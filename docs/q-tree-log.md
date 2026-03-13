@@ -349,3 +349,27 @@ Auto-closed: none
 No consistency issues.
 
 ---
+
+## Round 10 — Architecture Revision (internal tracking removal)
+
+### Discussion
+User questioned whether _forceAccrue and balanceOf are conflated. Led to analysis: with internal tracking, _forceAccrue doesn't affect tracked values, but then interest isn't reflected in NAV. Tension between donation protection and accurate interest accounting.
+
+User proposed: can we remove internal tracking entirely? Analysis of donation attack vectors with delta NAV:
+- Donation before navBefore: inflates both navBefore and navAfter equally → delta unchanged. Not exploitable.
+- Donation between navBefore/navAfter: impossible (same tx, reentrancy lock).
+- Donation for sync redeem profit: attacker net gain = donation * (shares/totalSupply - 1) → negative. Attacker loses.
+- totalSupply = 0 cases: no attack vector with delta NAV + minimum deposit.
+
+Conclusion: internal tracking unnecessary. Delta NAV + min deposit + reentrancy lock sufficient.
+
+### Recorded
+- ✗ Internal balance tracking → REMOVED, unnecessary with delta NAV architecture
+- ✓ _forceAccrue scope expanded → required before ALL position reads (not just delta NAV snapshots)
+- ✓ Migration flash loan amount → uses actualDebt (after _forceAccrue), not trackedDebt
+- NAV now reads actual position from lending protocol after _forceAccrue
+
+### Check
+No consistency issues. Simplification — fewer concepts, interest automatically reflected.
+
+---

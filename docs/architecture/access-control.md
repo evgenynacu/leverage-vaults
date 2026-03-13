@@ -37,6 +37,7 @@
 | onFlashLoan | Strategy | FlashLoanRouter | onlyFlashLoanRouter |
 | emergencyUnwind | Strategy | keeper, guardian | onlyKeeperOrGuardian |
 | setFlashLoanRouter | Strategy | admin | onlyAdmin |
+| getPosition | Strategy | anyone | -- (calls _forceAccrue internally) |
 | executeFlashLoan | FlashLoanRouter | Strategy, MigrationRouter | transient storage (sets initiator + active flag) |
 | onFlashLoanCallback | FlashLoanRouter | flash loan provider | transient storage validation (active flag set) |
 | migrate | MigrationRouter | position owner or approved | user is owner or approved for shares |

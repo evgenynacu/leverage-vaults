@@ -8,7 +8,7 @@ sequenceDiagram
     note right of Vault: POST: amount >= minDepositAmount
     note right of Vault: POST: vault not paused
     Vault->>BaseToken: transferFrom(user, vault, amount)
-    note right of BaseToken: POST: vault.idleBalance += amount
+    note right of BaseToken: POST: vault idle balance += amount
     Vault->>Vault: add to depositQueue[user][epoch]
     note right of Vault: POST: user's pending deposit recorded in current epoch
     note right of Vault: POST: totalAssets/NAV unchanged (idle excluded)
@@ -23,7 +23,7 @@ sequenceDiagram
     Vault->>Vault: remove from depositQueue[user][epoch]
     Vault->>BaseToken: transfer(user, amount)
     note right of Vault: POST: user's pending deposit = 0
-    note right of Vault: POST: idleBalance -= amount
+    note right of Vault: POST: idle balance -= amount
 ```
 
 ## processDepositEpoch
@@ -33,8 +33,8 @@ sequenceDiagram
     Keeper->>Vault: processDepositEpoch(calldata, router)
     note right of Vault: POST: caller is keeper, reentrancy lock acquired
     Vault->>Strategy: _forceAccrue()
-    note right of Vault: POST: interest accrued before snapshot
-    Vault->>Vault: navBefore = nav()
+    note right of Strategy: POST: lending protocol interest accrued
+    Vault->>Vault: navBefore = nav() (reads actual position from protocol)
     Vault->>Strategy: leverage(totalPending, calldata, router)
     Strategy->>FlashLoanRouter: executeFlashLoan(baseToken, amount, data)
     note right of FlashLoanRouter: POST: initiator = Strategy in transient storage, active flag set
@@ -45,12 +45,11 @@ sequenceDiagram
     Strategy->>DEX: swap baseToken -> YBT (via calldata)
     note right of Strategy: POST: received >= oracleValue(sent) * (1 - toleranceBps)
     Strategy->>LendingProtocol: supply(YBT)
-    note right of Strategy: POST: trackedCollateral += collateralSupplied
     Strategy->>LendingProtocol: borrow(baseToken)
-    note right of Strategy: POST: trackedDebt += debtBorrowed
     Strategy-->>FlashLoanRouter: repay flash loan
     note right of FlashLoanRouter: POST: zero token residual, active flag cleared
-    Vault->>Vault: navAfter = nav()
+    Vault->>Strategy: _forceAccrue()
+    Vault->>Vault: navAfter = nav() (reads actual position from protocol)
     note right of Vault: POST: navAfter > navBefore
     Vault->>Vault: mint shares to depositors pro-rata (round down)
     note right of Vault: POST: each depositor shares = depositAmount / (navDelta per unit)
@@ -78,16 +77,14 @@ sequenceDiagram
     Keeper->>Vault: processWithdrawalEpoch(calldata, router)
     note right of Vault: POST: caller is keeper, reentrancy lock acquired
     Vault->>Strategy: _forceAccrue()
-    note right of Strategy: POST: interest accrued before position read
+    note right of Strategy: POST: lending protocol interest accrued
     Vault->>Strategy: unwind(totalShares, totalSupply, calldata, router)
     Strategy->>FlashLoanRouter: executeFlashLoan(baseToken, amount, data)
     note right of FlashLoanRouter: POST: initiator = Strategy, active flag set
     FlashProvider-->>FlashLoanRouter: baseToken
     FlashLoanRouter->>Strategy: onFlashLoan(token, amount, fee, data)
     Strategy->>LendingProtocol: repay(proportional debt)
-    note right of Strategy: POST: trackedDebt -= repaid
     Strategy->>LendingProtocol: withdraw(proportional collateral)
-    note right of Strategy: POST: trackedCollateral -= withdrawn
     Strategy->>DEX: swap YBT -> baseToken (via calldata)
     note right of Strategy: POST: received >= oracleValue(sent) * (1 - toleranceBps)
     Strategy-->>FlashLoanRouter: repay flash loan
@@ -108,7 +105,7 @@ sequenceDiagram
     note right of Vault: POST: shares >= minWithdrawalAmount
     note right of Vault: POST: reentrancy lock acquired
     Vault->>Strategy: _forceAccrue()
-    note right of Vault: POST: interest accrued before position read
+    note right of Strategy: POST: lending protocol interest accrued
     Vault->>Vault: burn shares from user wallet
     note right of Vault: POST: user balance -= shares, totalSupply -= shares
     alt position exists (collateral > 0)
@@ -118,9 +115,7 @@ sequenceDiagram
         FlashProvider-->>FlashLoanRouter: baseToken
         FlashLoanRouter->>Strategy: onFlashLoan(token, amount, fee, data)
         Strategy->>LendingProtocol: repay(pro-rata debt)
-        note right of Strategy: POST: trackedDebt -= proRataDebt
         Strategy->>LendingProtocol: withdraw(pro-rata collateral)
-        note right of Strategy: POST: trackedCollateral -= proRataCollateral
         Strategy->>DEX: swap YBT -> baseToken
         note right of Strategy: POST: received >= oracleValue(sent) * (1 - toleranceBps)
         Strategy-->>FlashLoanRouter: repay flash loan
@@ -142,16 +137,15 @@ sequenceDiagram
     note right of Vault: POST: vault not paused
     note right of Vault: POST: reentrancy lock acquired
     Vault->>Strategy: _forceAccrue()
-    note right of Strategy: POST: interest accrued before navBefore
-    Vault->>Vault: navBefore = nav()
+    note right of Strategy: POST: lending protocol interest accrued
+    Vault->>Vault: navBefore = nav() (reads actual position from protocol)
     Vault->>Strategy: supplyAndBorrow(collateralAmount, debtAmount)
     Strategy->>LendingProtocol: supply(collateral)
-    note right of Strategy: POST: trackedCollateral += collateralAmount
     Strategy->>LendingProtocol: borrow(debtAmount)
-    note right of Strategy: POST: trackedDebt += debtAmount
     Strategy-->>MigrationRouter: baseToken (debt)
     note right of Strategy: POST: LTV within safety threshold
-    Vault->>Vault: navAfter = nav()
+    Vault->>Strategy: _forceAccrue()
+    Vault->>Vault: navAfter = nav() (reads actual position from protocol)
     Vault->>Vault: expectedDelta = oracleValue(collateralAmount) - debtAmount
     note right of Vault: POST: |navAfter - navBefore - expectedDelta| <= roundingToleranceBps
     Vault->>Vault: mint shares to user (round down)
@@ -167,16 +161,15 @@ sequenceDiagram
     note right of Vault: POST: user has no pending withdrawal requests
     note right of Vault: POST: reentrancy lock acquired
     Vault->>Strategy: _forceAccrue()
-    note right of Strategy: POST: interest accrued
+    note right of Strategy: POST: lending protocol interest accrued
     Vault->>Vault: burn shares from user (round up = fewer assets out)
     note right of Vault: POST: user balance -= shares
     Vault->>Strategy: repayAndWithdraw(shares, totalSupplyBefore)
-    Strategy->>Strategy: proRataDebt = shares/totalSupply * trackedDebt
-    Strategy->>Strategy: proRataCollateral = shares/totalSupply * trackedCollateral
+    Strategy->>Strategy: read actual position from protocol
+    Strategy->>Strategy: proRataDebt = shares/totalSupply * actualDebt
+    Strategy->>Strategy: proRataCollateral = shares/totalSupply * actualCollateral
     Strategy->>LendingProtocol: repay(proRataDebt)
-    note right of Strategy: POST: trackedDebt -= proRataDebt
     Strategy->>LendingProtocol: withdraw(proRataCollateral)
-    note right of Strategy: POST: trackedCollateral -= proRataCollateral
     Strategy-->>MigrationRouter: YBT collateral
     note right of Vault: POST: shares burned, proportional position unwound
 ```
@@ -187,7 +180,9 @@ sequenceDiagram
 sequenceDiagram
     User->>MigrationRouter: migrate(src, dst, shares, flRouter, convCalldata, convRouter)
     note right of MigrationRouter: POST: user is owner or approved for shares
-    MigrationRouter->>MigrationRouter: flashAmount = shares/totalSupply * srcStrategy.trackedDebt
+    MigrationRouter->>StrategyA: getPosition() (calls _forceAccrue internally)
+    note right of MigrationRouter: POST: actualDebt retrieved after accrual
+    MigrationRouter->>MigrationRouter: flashAmount = shares/totalSupply * actualDebt
     MigrationRouter->>FlashLoanRouter: executeFlashLoan(baseToken, flashAmount, data)
     note right of FlashLoanRouter: POST: initiator = MigrationRouter, active flag set
     FlashProvider-->>FlashLoanRouter: baseToken
@@ -212,14 +207,14 @@ sequenceDiagram
     Guardian->>Vault: forceUnwind(calldata, router)
     note right of Vault: POST: caller is guardian
     Vault->>Strategy: emergencyUnwind(calldata, router)
+    Strategy->>Strategy: _forceAccrue()
+    note right of Strategy: POST: lending protocol interest accrued
     Strategy->>FlashLoanRouter: executeFlashLoan(baseToken, totalDebt, data)
     note right of FlashLoanRouter: POST: initiator = Strategy, active flag set
     FlashProvider-->>FlashLoanRouter: baseToken
     FlashLoanRouter->>Strategy: onFlashLoan(token, amount, fee, data)
     Strategy->>LendingProtocol: repay(all debt)
-    note right of Strategy: POST: trackedDebt = 0
     Strategy->>LendingProtocol: withdraw(all collateral)
-    note right of Strategy: POST: trackedCollateral = 0
     Strategy->>DEX: swap all YBT -> baseToken
     note right of Strategy: POST: received >= oracleValue(sent) * (1 - toleranceBps)
     Strategy-->>FlashLoanRouter: repay flash loan
@@ -227,6 +222,26 @@ sequenceDiagram
     Strategy-->>Vault: remaining baseToken (now idle)
     note right of Vault: POST: position fully unwound, only idle base remains
     note right of Vault: POST: syncRedeem enters idle mode
+```
+
+## emergencyUnwind (keeper path)
+
+```mermaid
+sequenceDiagram
+    Keeper->>Strategy: emergencyUnwind(calldata, router)
+    note right of Strategy: POST: caller is keeper or guardian
+    Strategy->>Strategy: _forceAccrue()
+    note right of Strategy: POST: lending protocol interest accrued
+    Strategy->>FlashLoanRouter: executeFlashLoan(baseToken, totalDebt, data)
+    FlashProvider-->>FlashLoanRouter: baseToken
+    FlashLoanRouter->>Strategy: onFlashLoan(token, amount, fee, data)
+    Strategy->>LendingProtocol: repay(all debt)
+    Strategy->>LendingProtocol: withdraw(all collateral)
+    Strategy->>DEX: swap all YBT -> baseToken
+    note right of Strategy: POST: received >= oracleValue(sent) * (1 - toleranceBps)
+    Strategy-->>FlashLoanRouter: repay flash loan
+    Strategy-->>Vault: remaining baseToken (now idle)
+    note right of Strategy: POST: actual position = (0, 0)
 ```
 
 ## reclaimDeposit

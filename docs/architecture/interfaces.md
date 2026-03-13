@@ -43,12 +43,12 @@ function pendingWithdrawal(address user) external view returns (uint256)
 - **requestDeposit**: amount + msg.sender sufficient. Vault knows baseToken, does transferFrom, records in depositQueue[msg.sender][currentEpoch].
 - **cancelDeposit**: msg.sender + stored depositQueue state sufficient. Vault knows the pending amount from queue.
 - **requestWithdrawal**: shares + msg.sender sufficient. Vault escrows shares (transfer to self), records in withdrawalQueue.
-- **syncRedeem**: shares (from msg.sender wallet) + swap calldata/router sufficient. Vault reads trackedCollateral/trackedDebt from Strategy for pro-rata, delegates unwind. In idle mode, calldata/router ignored.
-- **processDepositEpoch**: leverageCalldata + swapRouter sufficient. Vault knows total pending from queue, passes to Strategy.leverage().
-- **processWithdrawalEpoch**: unwindCalldata + swapRouter sufficient. Vault knows total escrowed shares from queue, passes to Strategy.unwind().
+- **syncRedeem**: shares (from msg.sender wallet) + swap calldata/router sufficient. Vault calls Strategy._forceAccrue() then reads actual position via getPosition() for pro-rata. In idle mode (zero position), calldata/router ignored.
+- **processDepositEpoch**: leverageCalldata + swapRouter sufficient. Vault knows total pending from queue, calls _forceAccrue, measures delta NAV, passes to Strategy.leverage().
+- **processWithdrawalEpoch**: unwindCalldata + swapRouter sufficient. Vault knows total escrowed shares from queue, calls _forceAccrue, passes to Strategy.unwind().
 - **depositCustom**: user (share recipient), collateralAmount (YBT to supply, already transferred by MigrationRouter to Strategy), debtAmount (MigrationRouter knows flash loan size). Strategy supplies collateral, borrows debtAmount, sends baseToken back to msg.sender (MigrationRouter). Vault computes delta NAV and mints shares.
-- **withdrawCustom**: user (share owner), shares (amount to burn). Strategy computes pro-rata from shares/totalSupply * trackedDebt and trackedCollateral. Returns YBT collateral to msg.sender (MigrationRouter). No debtAmount param needed -- derived from internal state.
-- **forceUnwind**: calldata + router sufficient. Strategy unwinds entire position (reads trackedDebt/trackedCollateral from own state).
+- **withdrawCustom**: user (share owner), shares (amount to burn). Strategy computes pro-rata from shares/totalSupply * actualDebt and actualCollateral (read from protocol after _forceAccrue). Returns YBT collateral to msg.sender (MigrationRouter). No debtAmount param needed -- derived from actual position.
+- **forceUnwind**: calldata + router sufficient. Strategy reads actual position from protocol after _forceAccrue for full unwind.
 - **reclaimDeposit**: msg.sender sufficient. Vault checks timeout against epoch timestamp, returns stored pending amount.
 
 ## Strategy (abstract)
@@ -72,23 +72,24 @@ function _borrow(uint256 amount) internal virtual
 function _repay(uint256 amount) internal virtual
 function _withdraw(uint256 amount) internal virtual
 function _forceAccrue() internal virtual
+function _getPosition() internal virtual returns (uint256 collateral, uint256 debt)
 
 // --- Flash loan callback ---
 function onFlashLoan(address token, uint256 amount, uint256 fee, bytes calldata data) external onlyFlashLoanRouter
 
 // --- View ---
-function getPosition() external view returns (uint256 collateral, uint256 debt)
-function getTrackedPosition() external view returns (uint256 trackedCollateral, uint256 trackedDebt)
+function getPosition() external returns (uint256 collateral, uint256 debt)
 ```
 
 ### Parameter sufficiency notes
 
 - **leverage**: baseAmount (total pending from vault idle) + swap calldata/router sufficient. Strategy knows its own flashLoanRouter, baseToken, ybtToken. Internally: executeFlashLoan -> onFlashLoan callback -> swap -> supply -> borrow -> repay flash loan.
-- **unwind**: shares + totalSupply sufficient to compute pro-rata (shares/totalSupply * trackedDebt, shares/totalSupply * trackedCollateral). calldata/router for YBT->baseToken swap. Returns baseToken amount to Vault.
+- **unwind**: shares + totalSupply sufficient to compute pro-rata (shares/totalSupply * actualDebt, shares/totalSupply * actualCollateral, read from protocol after _forceAccrue). calldata/router for YBT->baseToken swap. Returns baseToken amount to Vault.
 - **supplyAndBorrow**: collateralAmount (YBT to supply, already transferred by MigrationRouter to Strategy) + debtAmount (explicit from MigrationRouter via Vault). Strategy supplies collateral, borrows debtAmount, sends baseToken to Vault (which sends to MigrationRouter). Returns amount sent.
-- **repayAndWithdraw**: shares + totalSupply sufficient. Strategy computes pro-rata debt/collateral from internal tracking. BaseToken for repayment comes from MigrationRouter (via flash loan, held by Strategy). Returns collateral (YBT) to Vault (which sends to MigrationRouter).
-- **emergencyUnwind**: calldata/router sufficient. Strategy reads trackedDebt/trackedCollateral from own state for full unwind.
+- **repayAndWithdraw**: shares + totalSupply sufficient. Strategy reads actual position from protocol after _forceAccrue and computes pro-rata debt/collateral. BaseToken for repayment comes from MigrationRouter (via flash loan, held by Strategy). Returns collateral (YBT) to Vault (which sends to MigrationRouter).
+- **emergencyUnwind**: calldata/router sufficient. Strategy reads actual position from protocol after _forceAccrue for full unwind.
 - **onFlashLoan**: called by FlashLoanRouter after provider callback. token, amount, fee from provider. data contains encoded swap calldata and operation context. Strategy knows what operation is in progress from its own transient/memory state.
+- **getPosition**: calls _forceAccrue() internally, then reads actual position from lending protocol. NOT a view function (forces accrual). Returns (actualCollateral, actualDebt).
 
 ## FlashLoanRouter
 
@@ -127,8 +128,8 @@ function onFlashLoan(address token, uint256 amount, uint256 fee, bytes calldata 
 
 ### Parameter sufficiency notes
 
-- **migrate**: sourceVault + destinationVault (knows both vaults to call withdrawCustom/depositCustom). shares (how many to migrate). flashLoanRouter (which provider to use). ybtConversionCalldata + conversionRouter (for YBT-A -> YBT-B swap; empty if same YBT). MigrationRouter computes flashAmount = shares/totalSupply * trackedDebt by reading sourceVault.strategy().getTrackedPosition() and sourceVault.totalSupply(). User must be owner or approved for shares in source vault. MigrationRouter calls FlashLoanRouter.executeFlashLoan() directly (not via Strategy).
-- **onFlashLoan**: called by FlashLoanRouter during migration flash loan. MigrationRouter is the initiator. Inside callback: calls sourceVault.withdrawCustom(user, shares) to get YBT + burn shares, optionally swaps YBT, calls destinationVault.depositCustom(user, collateralAmount, debtAmount) to supply + borrow, receives baseToken back to repay flash loan. debtAmount for depositCustom = flashAmount (the flash loan amount, which equals the source vault's pro-rata debt). data contains encoded parameters (user, sourceVault, destinationVault, shares, conversion params).
+- **migrate**: sourceVault + destinationVault (knows both vaults to call withdrawCustom/depositCustom). shares (how many to migrate). flashLoanRouter (which provider to use). ybtConversionCalldata + conversionRouter (for YBT-A -> YBT-B swap; empty if same YBT). MigrationRouter computes flashAmount = shares/totalSupply * actualDebt by calling sourceVault.strategy().getPosition() (which calls _forceAccrue internally) and sourceVault.totalSupply(). User must be owner or approved for shares in source vault.
+- **onFlashLoan**: called by FlashLoanRouter during migration flash loan. MigrationRouter is the initiator. Inside callback: calls sourceVault.withdrawCustom(user, shares) to get YBT + burn shares, optionally swaps YBT, calls destinationVault.depositCustom(user, collateralAmount, debtAmount) to supply + borrow, receives baseToken back to repay flash loan. data contains encoded parameters (user, sourceVault, destinationVault, shares, conversion params).
 
 ## Factory
 

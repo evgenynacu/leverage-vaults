@@ -5,10 +5,10 @@
 | Contract | Responsibility | Depends on |
 |----------|---------------|------------|
 | Vault | User-facing accounting: ERC20 shares, epoch queues, NAV calculation, pause logic, sync redeem, reentrancy lock | Strategy, MigrationRouter (authorized caller) |
-| Strategy (abstract) | Leverage orchestration: flash loan callback, swap execution, lending protocol calls, internal balance tracking | FlashLoanRouter, Lending Protocol (external) |
-| AaveStrategy | Strategy implementation for Aave v3: supply, borrow, repay, withdraw, forceAccrue | Strategy, Aave v3 (external) |
-| MorphoStrategy | Strategy implementation for Morpho Blue | Strategy, Morpho Blue (external) |
-| EulerStrategy | Strategy implementation for Euler v2 | Strategy, Euler v2 (external) |
+| Strategy (abstract) | Leverage orchestration: flash loan callback, swap execution, lending protocol calls. Reads actual position from protocol after _forceAccrue (no internal tracking). | FlashLoanRouter, Lending Protocol (external) |
+| AaveStrategy | Strategy implementation for Aave v3: supply, borrow, repay, withdraw, forceAccrue (forceUpdateReserves) | Strategy, Aave v3 (external) |
+| MorphoStrategy | Strategy implementation for Morpho Blue: supply, borrow, repay, withdraw, forceAccrue (accrueInterest) | Strategy, Morpho Blue (external) |
+| EulerStrategy | Strategy implementation for Euler v2: supply, borrow, repay, withdraw, forceAccrue (touch) | Strategy, Euler v2 (external) |
 | FlashLoanRouter | Per-provider interface adapter: normalizes flash loan callback. Validates callback via transient storage. Forwards to initiator.onFlashLoan(). No persistent state beyond config. | Flash loan provider (external) |
 | MigrationRouter | Stateless cross-vault migration orchestrator: calls FlashLoanRouter directly, implements onFlashLoan(), withdrawCustom on source, optional YBT conversion, depositCustom on destination | Vault (source + destination), FlashLoanRouter |
 | Factory | Deploys vault + strategy pairs, registry, sets MigrationRouter, deployment validation | Vault beacon, Strategy beacons, FlashLoanRouter |
@@ -57,15 +57,13 @@ graph TD
 - guardian -- guardian address (can pause, force-unwind)
 - keeper -- keeper address (processes epochs, emergency unwind)
 - keeperTimeoutDuration -- time after which users can reclaim unprocessed deposits
-- idleBalance -- base token balance not yet deployed (pending deposits)
 
 ### Strategy (abstract)
-- trackedCollateral -- internally tracked collateral supplied to lending protocol
-- trackedDebt -- internally tracked debt borrowed from lending protocol
 - vault -- address of associated Vault contract
 - flashLoanRouter -- active FlashLoanRouter address
 - baseToken -- the deposit/debt token address
 - ybtToken -- the yield-bearing token address
+- No trackedCollateral / trackedDebt -- position read from lending protocol via getPosition() after _forceAccrue()
 
 ### FlashLoanRouter
 - provider -- flash loan provider address (configuration, persistent)

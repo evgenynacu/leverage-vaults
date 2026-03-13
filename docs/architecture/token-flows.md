@@ -86,7 +86,7 @@ When position is fully unwound (zero collateral, zero debt), skip flash loan, re
 ```mermaid
 sequenceDiagram
     User->>MigrationRouter: migrate(srcVault, dstVault, shares, flRouter, convCalldata, convRouter)
-    MigrationRouter->>MigrationRouter: flashAmount = shares/totalSupply * srcStrategy.trackedDebt
+    MigrationRouter->>MigrationRouter: flashAmount = shares/totalSupply * actualDebt (after _forceAccrue)
     MigrationRouter->>FlashLoanRouter: executeFlashLoan(baseToken, flashAmount, data)
     FlashProvider-->>FlashLoanRouter: baseToken
     FlashLoanRouter->>MigrationRouter: onFlashLoan(token, amount, fee, data)

@@ -14,19 +14,20 @@
 - I10: Shares minted round down; assets returned on burn round down (favor vault)
 - I11: All deposit/withdrawal amounts >= configured minimums
 - I12: depositCustom arithmetic NAV check: |actualNavDelta - expectedNavDelta| <= roundingToleranceBps, where expectedDelta = oracleValue(collateral) - debtAmount
-- I13: _forceAccrue() called before any NAV snapshot (depositCustom, processEpoch, syncRedeem)
+- I13: _forceAccrue() called before any position read (depositCustom, withdrawCustom, processDepositEpoch, processWithdrawalEpoch, syncRedeem, emergencyUnwind, forceUnwind, migration flash loan amount)
 - I14: Transient storage reentrancy lock active during depositCustom, withdrawCustom, processEpoch, syncRedeem (mutual exclusion)
 - I15: withdrawCustom reverts if user has pending withdrawal requests
 - I16: Cancel deposit only possible before epoch processing starts
 
 ## Strategy
 
-- I1: trackedCollateral and trackedDebt updated on every supply, borrow, repay, withdraw operation
-- I2: NAV = oracleValue(trackedCollateral) - trackedDebt (internal accounting, ignores balanceOf)
+- I1: NAV = oracleValue(actualCollateral) - actualDebt, read from lending protocol after _forceAccrue()
+- I2: No internal balance tracking -- position always read from protocol
 - I3: Proportional exit preserves LTV ratio for remaining users
 - I4: Post-operation LTV health check on migration depositCustom path -- revert if exceeds safety threshold
 - I5: Strategy contract is the position owner in the lending protocol
 - I6: Emergency unwind = full position unwind only (no partial rebalance)
+- I7: _forceAccrue() called before every _getPosition() invocation
 
 ## FlashLoanRouter
 
@@ -41,7 +42,7 @@
 - I1: Source and destination vaults must share the same debt token (base token)
 - I2: YBT conversion verified via oracle-floor check (source oracle for outgoing, destination oracle for incoming)
 - I3: Migration only by position owner or approved address
-- I4: Flash loan amount = shares/totalSupply * trackedDebt (computed from source vault's Strategy.getTrackedPosition() and totalSupply())
+- I4: Flash loan amount = shares/totalSupply * actualDebt (computed from source vault's Strategy.getPosition() after _forceAccrue)
 - I5: After migration: source shares burned, destination shares minted, flash loan fully repaid
 
 ## Factory

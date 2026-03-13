@@ -29,13 +29,13 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
       - ✓ depositCustom signature → Needs explicit debtAmount param; withdrawCustom uses pro-rata from shares [d:dc-signature]
       - ✓ Oracle protection for sync delta NAV [d:dc-oracle]
         - ✓ Arithmetic NAV validation → expectedDelta = oracleValue(collateral) - debt, revert on deviation [d:arith-nav]
-        - ✓ Interest accrual before snapshot → must have, Strategy._forceAccrue() before navBefore [d:accrue-before-snap]
+        - ✓ Interest accrual before position read → must have, Strategy._forceAccrue() before ANY position read [d:accrue-before-snap]
       - ✓ Reentrancy protection [d:dc-reentrancy]
         - ✓ Transient storage lock → Vault-level EIP-1153, covers depositCustom/withdrawCustom/processEpoch/syncRedeem [d:reentrancy-lock]
     - ✓ Migration granularity → Per-user opt-in [d:migration-scope]
     - ✓ MigrationRouter upgrade path → Immutable, Factory.setMigrationRouter updates for new vaults [d:migration-router-upgrade]
     - ✓ Migration flash loan source → MigrationRouter calls FlashLoanRouter directly, not via Strategy [d:migration-flash-source]
-    - ✓ Migration flash loan amount → Computed from source vault: shares/totalSupply * trackedDebt [d:migration-flash-amount]
+    - ✓ Migration flash loan amount → Computed from source vault: shares/totalSupply * actualDebt (after _forceAccrue) [d:migration-flash-amount]
   - ✓ Withdrawal flow → Dual path: async epochs (keeper batched) + sync permissionless redeem (user calldata) [d:withdrawal]
     - ✓ Async withdrawal → Async epoch, proportional, keeper batches [d:wd-async]
     - ✓ Who provides unwind calldata → Keeper for async; user for sync redeem [d:wd-calldata]
@@ -67,7 +67,7 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
   - ✓ Sync redeem idle mode → Skip flash loan, return shares/totalSupply * idleBase [d:sync-idle]
   - ✓ Partial migration → Yes, user specifies share count [d:partial-migration]
   - ✓ Factory deployment validation → Oracle reachable, market valid, tolerance <= ceiling, token match [d:factory-validation]
-  - ✓ Donation attack protection → Internal balance tracking, not balanceOf [d:internal-tracking]
+  - ✗ Donation attack protection → Internal tracking removed; delta NAV + min deposit + reentrancy sufficient [d:internal-tracking]
   - ✓ Rounding direction → Round down mint, round up burn (favor vault) [d:rounding]
   - ✓ Minimum amounts → Admin-settable min for deposit and withdrawal, anti-dust + rounding protection [d:min-amounts]
   - ✓ First-depositor protection → Minimum deposit sufficient, dead shares not needed [d:first-depositor]
@@ -186,11 +186,12 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 - Strictly stronger and cheaper than circuit breaker — we know exactly what went in and came out.
 - Catches: oracle manipulation between snapshots, unexpected protocol fees, accounting bugs.
 
-### [d:accrue-before-snap] Interest Accrual Before NAV Snapshot
-- Must have — observed in practice that lazy accrual inflates deltaNAV with interest belonging to existing holders.
-- Strategy calls _forceAccrue() before navBefore snapshot in depositCustom.
+### [d:accrue-before-snap] Interest Accrual Before Position Read
+- Must have — lazy accrual in lending protocols means position reads can return stale data (missing accrued interest on debt/collateral).
+- Strategy calls _forceAccrue() before ANY read of position from lending protocol.
 - Each Strategy subclass implements protocol-specific accrual (Aave forceUpdateReserves, Morpho accrueInterest, Euler touch).
-- Applies to depositCustom, processEpoch, AND syncRedeem (before reading position balances for proportional split).
+- Applies to ALL flows that read position: processDepositEpoch, processWithdrawalEpoch, syncRedeem, depositCustom, withdrawCustom, emergencyUnwind, forceUnwind, and any NAV/position query used for migration flash loan amount computation.
+- Without _forceAccrue: delta NAV could include interest that accrued during the tx (belongs to existing holders, not new depositors). Pro-rata calculations could use stale debt amounts.
 
 ### [d:dc-reentrancy] Reentrancy Protection
 - EIP-1153 transient storage lock on Vault + CEI ordering.
@@ -369,13 +370,13 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 - Catches misconfigurations at deploy time rather than at first user deposit.
 - No off-chain trust — all validation runs in the deployment transaction.
 
-### [d:internal-tracking] Internal Balance Tracking (Donation Attack Protection)
-- Strategy tracks supplied collateral and borrowed debt amounts internally, not via balanceOf/position queries.
-- Updated on every supply, borrow, repay, withdraw operation.
-- NAV calculated from internal accounting: oracleValue(trackedCollateral) - trackedDebt.
-- Neutralizes donation attacks — direct token transfers to the lending position or strategy don't affect NAV.
-- With delta NAV, virtual shares don't help: the attack vector is manipulating reported balances between navBefore/navAfter snapshots. Internal tracking eliminates this entirely.
-- Trade-off: must keep accounting in sync with actual protocol state. Any mismatch = incorrect NAV.
+### [d:internal-tracking] Donation Attack Protection (Internal Tracking Removed)
+- REMOVED: internal balance tracking was originally proposed but is unnecessary.
+- Delta NAV pricing makes donation non-exploitable: donation before navBefore inflates both navBefore and navAfter equally → delta unchanged. Donation between navBefore/navAfter prevented by reentrancy lock.
+- Sync redeem donation: attacker donates to inflate NAV, then redeems. Net gain = donation * (shares/totalSupply - 1) → negative. Attacker loses money.
+- NAV now reads actual position from lending protocol (after _forceAccrue): oracleValue(actualCollateral) - actualDebt.
+- Benefits: simpler architecture, interest automatically reflected in NAV, no sync issues.
+- Protections sufficient without internal tracking: delta NAV + minimum deposit + reentrancy lock + _forceAccrue.
 
 ### [d:rounding] Rounding Direction Policy
 - Round down on share minting — depositor gets fewer shares (vault keeps dust).
@@ -391,7 +392,7 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 - depositCustom/withdrawCustom (migration) — minimum applies to the share count being migrated.
 
 ### [d:first-depositor] First-Depositor Protection
-- Classic ERC4626 donation attack does NOT apply: delta NAV prices each deposit cohort independently, internal balance tracking ignores direct token transfers.
+- Classic ERC4626 donation attack does NOT apply: delta NAV prices each deposit cohort independently. Donation inflates navBefore and navAfter equally → delta unchanged.
 - Remaining risk: rounding precision in pro-rata calculations (sync redeem, async withdrawal) when totalSupply is very small.
 - Minimum deposit is sufficient: with 18-decimal shares, even 1 unit of base token creates ~1e18 shares — more than enough precision.
 - Dead shares not needed: if totalSupply returns to 0 (all withdraw), next "first" deposit is safe under delta NAV (independently priced).
@@ -419,7 +420,7 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 - Which FlashLoanRouter: MigrationRouter can use any registered FlashLoanRouter. Could be configured per-call or use a default.
 
 ### [d:migration-flash-amount] Migration Flash Loan Amount
-- Computed from source vault's tracked position: shares/totalSupply * trackedDebt.
-- MigrationRouter reads source vault's Strategy.getTrackedPosition() and totalSupply() to calculate.
+- Computed from source vault's actual position (after _forceAccrue): shares/totalSupply * actualDebt.
+- MigrationRouter reads source vault's Strategy.getPosition() (which calls _forceAccrue internally) and totalSupply() to calculate.
 - This is the exact debt amount that needs to be repaid to withdraw the proportional collateral.
 - Flash loan amount = this debt amount (borrowed to repay source vault's debt, then re-borrowed from destination vault to repay flash loan).
