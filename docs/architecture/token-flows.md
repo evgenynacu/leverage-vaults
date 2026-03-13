@@ -6,35 +6,36 @@
 sequenceDiagram
     User->>Vault: requestDeposit(amount)
     Vault->>BaseToken: transferFrom(user, vault, amount)
-    Note over Vault: funds idle, no shares yet
-    Keeper->>Vault: processDepositEpoch(calldata, router)
-    Vault->>Strategy: leverage(baseAmount, calldata, router)
+    Note over Vault: funds idle in FIFO queue, no shares yet
+    Keeper->>Vault: processDeposits(count, calldata, router)
+    Vault->>Strategy: deposit(totalAmount, calldata, router)
     Strategy->>FlashLoanRouter: executeFlashLoan(baseToken, flashAmount, data)
     FlashLoanRouter->>FlashProvider: flash borrow baseToken
     FlashProvider-->>FlashLoanRouter: baseToken
-    FlashLoanRouter->>Strategy: onFlashLoan(token, amount, fee, data)
+    FlashLoanRouter->>Strategy: onFlashLoan(token, amount, 0, data)
     Strategy->>DEX: swap baseToken -> YBT (via calldata)
     DEX-->>Strategy: YBT
     Strategy->>LendingProtocol: supply(YBT as collateral)
     Strategy->>LendingProtocol: borrow(baseToken)
     LendingProtocol-->>Strategy: baseToken (borrowed)
-    Strategy->>FlashLoanRouter: repay flash loan + fee
-    Vault-->>Users: mint shares (delta NAV)
+    Strategy->>FlashLoanRouter: repay flash loan (zero fee)
+    Note over Strategy: POST: post-leverage LTV <= maxLTV
+    Vault-->>Users: mint shares (delta NAV, round down)
 ```
 
-baseToken: User -> Vault (idle) -> Strategy -> DEX (swap to YBT) -> LendingProtocol (collateral). LendingProtocol -> Strategy (borrow baseToken) -> FlashLoanRouter (repay).
+baseToken: User -> Vault (idle) -> Strategy -> DEX (swap to YBT) -> LendingProtocol (collateral). LendingProtocol -> Strategy (borrow baseToken) -> FlashLoanRouter (repay). Keeper processes N requests from FIFO head, including partial fills.
 
-## Async Withdrawal (keeper epoch)
+## Async Redeem (keeper epoch)
 
 ```mermaid
 sequenceDiagram
-    User->>Vault: requestWithdrawal(shares)
+    User->>Vault: requestRedeem(shares)
     Vault->>Vault: escrow shares (transfer to vault)
-    Keeper->>Vault: processWithdrawalEpoch(calldata, router)
-    Vault->>Strategy: unwind(shares, totalSupply, calldata, router)
+    Keeper->>Vault: processRedeems(count, calldata, router)
+    Vault->>Strategy: redeem(fraction, calldata, router)
     Strategy->>FlashLoanRouter: executeFlashLoan(baseToken, flashAmount, data)
     FlashProvider-->>FlashLoanRouter: baseToken
-    FlashLoanRouter->>Strategy: onFlashLoan(token, amount, fee, data)
+    FlashLoanRouter->>Strategy: onFlashLoan(token, amount, 0, data)
     Strategy->>LendingProtocol: repay(proportional debt)
     Strategy->>LendingProtocol: withdraw(proportional collateral)
     LendingProtocol-->>Strategy: YBT
@@ -46,7 +47,7 @@ sequenceDiagram
     Vault-->>Users: distribute baseToken pro-rata
 ```
 
-LendingProtocol -> Strategy (withdraw YBT collateral) -> DEX (swap to baseToken) -> Vault -> Users.
+LendingProtocol -> Strategy (withdraw YBT collateral) -> DEX (swap to baseToken) -> Vault -> Users. Keeper processes N requests from FIFO head.
 
 ## Sync Permissionless Redeem
 
@@ -54,10 +55,10 @@ LendingProtocol -> Strategy (withdraw YBT collateral) -> DEX (swap to baseToken)
 sequenceDiagram
     User->>Vault: syncRedeem(shares, calldata, router)
     Vault->>Vault: burn shares from user wallet
-    Vault->>Strategy: unwind(shares, totalSupply, calldata, router)
+    Vault->>Strategy: redeem(fraction, calldata, router)
     Strategy->>FlashLoanRouter: executeFlashLoan(baseToken, flashAmount, data)
     FlashProvider-->>FlashLoanRouter: baseToken
-    FlashLoanRouter->>Strategy: onFlashLoan(token, amount, fee, data)
+    FlashLoanRouter->>Strategy: onFlashLoan(token, amount, 0, data)
     Strategy->>LendingProtocol: repay(pro-rata debt)
     Strategy->>LendingProtocol: withdraw(pro-rata collateral)
     LendingProtocol-->>Strategy: YBT
@@ -68,7 +69,7 @@ sequenceDiagram
     Vault-->>User: transfer baseToken
 ```
 
-Same as async withdrawal but user-initiated with user-provided calldata. User pays gas + slippage. Always available even when paused.
+Same as async redeem but user-initiated with user-provided calldata. Vault computes fraction = shares * 1e18 / totalSupply. User pays gas + slippage. Always available even when paused.
 
 ## Sync Redeem (Idle Mode)
 
@@ -89,65 +90,66 @@ sequenceDiagram
     MigrationRouter->>MigrationRouter: flashAmount = shares/totalSupply * actualDebt (after _forceAccrue)
     MigrationRouter->>FlashLoanRouter: executeFlashLoan(baseToken, flashAmount, data)
     FlashProvider-->>FlashLoanRouter: baseToken
-    FlashLoanRouter->>MigrationRouter: onFlashLoan(token, amount, fee, data)
-    MigrationRouter->>VaultA: withdrawCustom(user, shares)
-    VaultA->>StrategyA: repayAndWithdraw(shares, totalSupply)
-    StrategyA->>LendingA: repay debt (from flash loan baseToken)
+    FlashLoanRouter->>MigrationRouter: onFlashLoan(token, amount, 0, data)
+    MigrationRouter->>StrategyA: transfer baseToken (for debt repayment)
+    MigrationRouter->>VaultA: redeemCustom(user, shares)
+    VaultA->>StrategyA: redeemCustom(fraction)
+    StrategyA->>LendingA: repay debt (using transferred baseToken)
     StrategyA->>LendingA: withdraw collateral (YBT-A)
-    StrategyA-->>VaultA: YBT-A
-    VaultA-->>MigrationRouter: YBT-A + burns shares
+    StrategyA-->>MigrationRouter: YBT-A
+    VaultA->>VaultA: burn user shares
     MigrationRouter->>DEX: swap YBT-A -> YBT-B (if different, via convCalldata)
     DEX-->>MigrationRouter: YBT-B
-    MigrationRouter->>VaultB: depositCustom(user, collateralAmount, debtAmount)
-    VaultB->>StrategyB: supplyAndBorrow(collateralAmount, debtAmount)
+    MigrationRouter->>StrategyB: transfer YBT-B (collateral for deposit)
+    MigrationRouter->>VaultB: depositCustom(user, collateralAmount, flashAmount)
+    VaultB->>StrategyB: depositCustom(collateralAmount, flashAmount)
     StrategyB->>LendingB: supply(YBT-B as collateral)
-    StrategyB->>LendingB: borrow(baseToken)
+    StrategyB->>LendingB: borrow(baseToken, flashAmount)
     LendingB-->>StrategyB: baseToken
-    StrategyB-->>VaultB: baseToken (debt back to caller)
-    VaultB-->>MigrationRouter: baseToken + mints shares to user
+    StrategyB-->>MigrationRouter: baseToken (debt back to caller)
+    VaultB->>VaultB: mint shares to user (delta NAV)
     MigrationRouter->>FlashLoanRouter: repay flash loan
 ```
 
-Source: shares burned, collateral withdrawn, debt repaid. Destination: collateral supplied, debt borrowed, shares minted. Flash loan bridges the debt repayment. MigrationRouter calls FlashLoanRouter directly (not via Strategy).
+Source: MigrationRouter transfers baseToken to Strategy before redeemCustom. Shares burned, collateral withdrawn, debt repaid. Destination: collateral supplied, debt borrowed (debtAmount = flashAmount), shares minted. Flash loan bridges the debt repayment. MigrationRouter calls FlashLoanRouter directly (not via Strategy). debtAmount passed to depositCustom is the flash loan amount.
 
 ## Cancel Pending Deposit
 
 ```mermaid
 sequenceDiagram
-    User->>Vault: cancelDeposit()
+    User->>Vault: cancelDeposit(requestId)
     Vault-->>User: transfer baseToken back
 ```
 
 baseToken: Vault -> User. No shares were ever minted.
 
-## Reclaim After Keeper Timeout
+## Reclaim After Per-User Timeout
 
 ```mermaid
 sequenceDiagram
-    User->>Vault: reclaimDeposit()
-    Note over Vault: verify timeout elapsed
+    User->>Vault: reclaimDeposit(requestId)
+    Note over Vault: verify request.timestamp + requestTimeout < block.timestamp
+    Vault->>Vault: mark request as reclaimed (keeper skips)
     Vault-->>User: transfer baseToken back
-    Note over Vault: epoch voided
 ```
 
-baseToken: Vault -> User. Epoch voided after timeout.
+baseToken: Vault -> User. Request marked reclaimed — keeper skips it in FIFO queue. Each request has its own deadline.
 
-## Force-Unwind
+## Emergency Redeem
 
 ```mermaid
 sequenceDiagram
-    Guardian->>Vault: forceUnwind(calldata, router)
-    Vault->>Strategy: emergencyUnwind(calldata, router)
+    Keeper/Guardian->>Strategy: emergencyRedeem(calldata, router)
     Strategy->>FlashLoanRouter: executeFlashLoan(baseToken, totalDebt, data)
     FlashProvider-->>FlashLoanRouter: baseToken
-    FlashLoanRouter->>Strategy: onFlashLoan(token, amount, fee, data)
+    FlashLoanRouter->>Strategy: onFlashLoan(token, amount, 0, data)
     Strategy->>LendingProtocol: repay(all debt)
     Strategy->>LendingProtocol: withdraw(all collateral)
     LendingProtocol-->>Strategy: all YBT
     Strategy->>DEX: swap all YBT -> baseToken
     DEX-->>Strategy: baseToken
-    Strategy->>FlashLoanRouter: repay flash loan + fee
+    Strategy->>FlashLoanRouter: repay flash loan (zero fee)
     Strategy-->>Vault: remaining baseToken -> idle
 ```
 
-Full position unwind to idle base. After this, users exit via sync redeem idle mode.
+Full position unwind to idle base. Keeper or guardian calls Strategy.emergencyRedeem() directly (not through Vault). After this, users exit via sync redeem idle mode.

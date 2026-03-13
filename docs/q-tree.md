@@ -2,7 +2,7 @@
 
 > Goal: Leveraged DeFi vault that buys YBT (yield-bearing tokens) with leverage using liquidity from Aave/Morpho/Euler (extensible). Entry/exit via flash loan in a single transaction. One vault = one strategy, but many vaults can be created with different YBT and lending protocols. Support liquidity migration between compatible strategies without full unwind to base token (e.g., PT-sUSDe/USDe → sUSDe/USDe).
 >
-> Resolved: 56 | Suggested: 0 | Open: 0
+> Resolved: 69 | Suggested: 0 | Open: 0
 
 Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 
@@ -71,6 +71,19 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
   - ✓ Rounding direction → Round down mint, round up burn (favor vault) [d:rounding]
   - ✓ Minimum amounts → Admin-settable min for deposit and withdrawal, anti-dust + rounding protection [d:min-amounts]
   - ✓ First-depositor protection → Minimum deposit sufficient, dead shares not needed [d:first-depositor]
+  - ✓ Naming convention → deposit/redeem terminology throughout Vault and Strategy [d:naming]
+  - ✓ Strategy fraction argument → Strategy receives fraction (of 1e18) instead of shares/totalSupply [d:fraction-arg]
+  - ✓ Flash loan providers → only zero-fee providers (Balancer, Morpho, etc.) [d:flash-fee]
+  - ✓ Swap calldata margin → Caller builds calldata with margin, oracle-floor check validates output [d:swap-margin]
+  - ✓ Partial epoch processing → Keeper processes N requests from FIFO head, including partial fills [d:partial-epoch]
+  - ✓ Per-user timeout → Each request has own deadline for reclaim, not tied to epoch [d:per-user-timeout]
+  - ✓ Emergency redeem entry point → Keeper and guardian call Strategy.emergencyRedeem directly, no Vault wrapper [d:keeper-emergency]
+  - ✓ Max leverage ratio → Strategy.deposit checks post-leverage LTV, per-vault param, admin-settable [d:max-ltv]
+  - ✓ FlashLoanRouter per-provider callbacks → Implementation detail, architecture defines normalized interface only [d:flr-callbacks]
+  - ✓ Oracle interface → Implementation detail (ADR DT-002 covers OracleRouter + IPriceFeed) [d:oracle-interface]
+  - ✓ FlashLoanRouter.executeFlashLoan access → Open (anyone can call), transient storage callback validation sufficient [d:flr-access]
+  - ✓ Beacon ownership → Same admin as Factory, single owner for all beacons [d:beacon-owner]
+  - ✓ redeemCustom token flow → MigrationRouter transfers baseToken to Strategy before calling redeemCustom [d:redeem-custom-flow]
 
 ## Details
 
@@ -138,7 +151,7 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 - Reason: deposit leverages up (flash loan → buy YBT → supply → borrow), withdrawal unwinds (opposite direction). Opposite token flows cannot be combined.
 
 ### [d:keeper-timeout] Keeper Liveness Fallback
-- Timeout + user reclaim — if epoch not processed within N time, users call reclaimDeposit(). Epoch voided.
+- Per-user timeout + reclaim — if a request not processed within N time from submission, user calls reclaimDeposit(). Only that request voided.
 - No permissionless settle — too risky (MEV/sandwich without keeper routing optimization).
 - Guardian can also trigger reclaim on behalf of users.
 - Note: with sync permissionless redeem, keeper liveness is less critical for exits (only affects deposits).
@@ -402,7 +415,7 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 - No token residual — after callback completes, FlashLoanRouter holds zero tokens. All borrowed forwarded to initiator, all repayment sent back to provider.
 - Callback only from active provider — validated via transient storage flag set before initiating flash loan. Prevents spoofed callbacks.
 - Single flash loan at a time — transient storage ensures no nested flash loans through the same router.
-- Fee accounting — flash loan fee passed through to caller (Strategy/MigrationRouter), not absorbed by router.
+- Zero fee — only zero-fee flash loan providers are used. No fee accounting needed.
 
 ### [d:flr-state] FlashLoanRouter State
 - No persistent state beyond configuration (which flash loan provider to use).
@@ -424,3 +437,85 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 - MigrationRouter reads source vault's Strategy.getPosition() (which calls _forceAccrue internally) and totalSupply() to calculate.
 - This is the exact debt amount that needs to be repaid to withdraw the proportional collateral.
 - Flash loan amount = this debt amount (borrowed to repay source vault's debt, then re-borrowed from destination vault to repay flash loan).
+
+### [d:naming] Naming Convention
+- Consistent deposit/redeem terminology throughout Vault and Strategy.
+- Vault: requestDeposit/requestRedeem (async), syncRedeem (sync), processDeposits/processRedeems (keeper), depositCustom/redeemCustom (migration).
+- Strategy: deposit/redeem (epoch leverage/unwind), depositCustom/redeemCustom (migration supply+borrow / repay+withdraw), emergencyRedeem (full unwind, called directly by keeper/guardian).
+- Rationale: unified language makes flows easier to follow. "Withdrawal" replaced by "redeem" everywhere.
+
+### [d:fraction-arg] Strategy Fraction Argument
+- Strategy receives fraction (scaled to 1e18) instead of raw shares/totalSupply pair.
+- Vault computes fraction = shares * 1e18 / totalSupply, passes to Strategy.
+- Strategy applies fraction to actual position: amount = fraction * actualDebt / 1e18 (same for collateral).
+- Separation of concerns: Vault owns share accounting, Strategy only knows "what portion of the position to process".
+- fraction = 1e18 means full position (used in emergencyRedeem/forceRedeem).
+
+### [d:flash-fee] Flash Loan Providers — Zero Fee Only
+- Only zero-fee flash loan providers are used (Balancer, Morpho, Aave with 0-fee markets, etc.).
+- Rationale: leverage/unwind happens on every deposit and withdrawal epoch. Non-zero fee would make entry/exit prohibitively expensive at scale.
+- Factory validation or FlashLoanRouter registration should verify zero-fee property.
+- Simplifies calldata construction: no need to account for flash loan fee in swap amounts.
+
+### [d:swap-margin] Swap Calldata Margin
+- Caller (keeper/user/guardian) constructs DEX swap calldata off-chain for a slightly smaller amountIn than expected on-chain amount.
+- Reason: on-chain amount may differ due to interest accrual between calldata construction and execution, rounding in pro-rata calculations.
+- Oracle-floor check still validates: amountReceived >= oracleValue(amountSent) * (1 - toleranceBps).
+- Residual dust (difference between actual amount and swap amountIn) stays in Strategy. Accumulates over time.
+- Affected flows: processDeposits (base→YBT), processRedeems (YBT→base), syncRedeem (YBT→base), forceRedeem (YBT→base), emergencyRedeem (YBT→base), migration YBT conversion.
+
+### [d:partial-epoch] Partial Epoch Processing
+- Keeper can process N requests from the head of the FIFO queue per call, including just one.
+- Requests can be partially filled — e.g., a large deposit request can be split across multiple keeper calls.
+- FIFO order mandatory — keeper cannot cherry-pick or reorder requests. Prevents censorship and unfair execution.
+- Different batches may get different execution prices — acceptable trade-off, same as requests arriving in different blocks.
+- Use case: large request exceeds available DEX liquidity, keeper processes a portion now and the rest later.
+
+### [d:per-user-timeout] Per-User Timeout
+- Each request stores its own submission timestamp.
+- If not processed (even partially) within timeout period, user can call reclaimDeposit() to withdraw.
+- Not tied to epoch — individual requests expire independently.
+- Reclaimed requests create gaps in FIFO queue — keeper skips them (marked as reclaimed).
+- Handles the case where keeper processes other requests but skips a specific one — user is not stuck indefinitely.
+- Replaces epoch-level timeout (which only worked if keeper was fully offline).
+
+### [d:keeper-emergency] Emergency Redeem Entry Point
+- Keeper and guardian both call Strategy.emergencyRedeem() directly — not through Vault.
+- Vault doesn't need a forceRedeem wrapper. Emergency unwind is a Strategy concern (position management).
+- Strategy.emergencyRedeem uses fraction = 1e18 (full position unwind).
+- NAV automatically reflects unwound position (reads actual from lending protocol).
+- Access: onlyKeeperOrGuardian modifier on Strategy.
+
+### [d:max-ltv] Max Leverage Ratio Enforcement
+- Strategy.deposit() checks post-leverage LTV against maxLTV parameter after building position.
+- Per-vault parameter, set by admin (via Strategy or Factory at deployment).
+- Reverts if post-leverage LTV exceeds limit — prevents dangerously leveraged positions.
+- Also checked on depositCustom (migration) — ensures migrated positions respect destination vault's limit.
+
+### [d:flr-callbacks] FlashLoanRouter Per-Provider Callbacks
+- Implementation detail — each FlashLoanRouter subclass handles its provider's specific callback signature.
+- Architecture only defines: FlashLoanRouter exposes executeFlashLoan() and normalizes all provider callbacks into initiator.onFlashLoan(token, amount, fee, data).
+- Provider-side signatures (Aave executeOperation, Balancer receiveFlashLoan, Morpho onMorphoFlashLoan) are implementation concerns.
+
+### [d:oracle-interface] Oracle Interface
+- Implementation detail covered by ADR DT-002: OracleRouter with pluggable IPriceFeed adapters.
+- Architecture scope: oracleValue() converts between tokens using vault's configured oracle. Used for NAV and swap floor checks.
+- Specific interface (Chainlink AggregatorV3, custom feeds) decided in ADR phase, not architecture.
+
+### [d:flr-access] FlashLoanRouter.executeFlashLoan Access
+- Open access — anyone can call executeFlashLoan().
+- Security relies on transient storage callback validation, not caller restriction.
+- Rationale: FlashLoanRouter is stateless, holds no funds between txs. The callback validates origin. Restricting callers adds complexity without security benefit.
+- Both Strategy and MigrationRouter call it — and future initiators could too without needing registration.
+
+### [d:beacon-owner] Beacon Ownership
+- Same admin as Factory owns all beacon contracts (Vault beacon, Strategy beacons, FlashLoanRouter beacons).
+- Single admin simplifies governance — one multisig/timelock controls all upgrades.
+- Admin can transfer beacon ownership independently if needed (e.g., separate upgrade governance later).
+
+### [d:redeem-custom-flow] redeemCustom Token Flow
+- MigrationRouter transfers flash-loaned baseToken to Strategy before calling Vault.redeemCustom().
+- Strategy uses this baseToken to repay proportional debt in lending protocol.
+- Strategy then withdraws proportional collateral (YBT) and sends it back to MigrationRouter.
+- Vault burns user's shares.
+- Flow: MigrationRouter → transfer baseToken → Strategy | Vault.redeemCustom() → Strategy repays debt + withdraws collateral → YBT sent to MigrationRouter.

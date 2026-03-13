@@ -373,3 +373,92 @@ Conclusion: internal tracking unnecessary. Delta NAV + min deposit + reentrancy 
 No consistency issues. Simplification — fewer concepts, interest automatically reflected.
 
 ---
+
+## Round 11 — Naming + fraction argument
+
+### Presented
+User requested: (1) sync naming with deposit/redeem throughout Vault and Strategy, (2) Strategy should receive fraction of 1e18 instead of shares/totalSupply pair.
+
+### User response
+Y. Only record the core ideas (naming + fraction), not the full derived interface.
+
+### Recorded
+1. ✓ Naming convention → deposit/redeem terminology throughout Vault and Strategy
+2. ✓ Strategy fraction argument → fraction (of 1e18) instead of shares/totalSupply
+
+### Check
+No consistency issues.
+
+---
+
+## Round 12 — Flash loan fee + swap calldata margin
+
+### Discussion
+User raised: callers construct swap calldata off-chain for specific amounts, but on-chain amounts may differ (interest accrual, rounding). Analysis identified affected flows: processDeposits, processRedeems, syncRedeem, forceRedeem, emergencyRedeem, migration YBT conversion.
+
+User immediately clarified: flash loan fee is not a factor — only zero-fee providers are used. Leverage/unwind on every epoch makes non-zero fees prohibitively expensive.
+
+### Recorded
+1. ✓ Flash loan providers → zero-fee only (Balancer, Morpho, etc.)
+2. ✓ Swap calldata margin → caller builds calldata with margin, oracle-floor check validates output
+
+### Check
+No consistency issues. Zero-fee simplifies FlashLoanRouter invariants (removed fee accounting).
+
+---
+
+## Round 13 — Partial epoch processing + per-user timeout
+
+### Discussion
+User asked about slippage protection. Analysis: sync redeem and migration — user controls calldata. Async deposit/redeem — only oracle-floor (100 bps ceiling). Options discussed: per-user minOut, opt-out, cancel window. Decided: oracle-floor sufficient for MVP, sync redeem available for users who want control.
+
+Then user asked about processing requests partially (not full epoch). Identified risks: keeper cherry-picking, censorship, different prices for same-time requests. Mitigations: FIFO mandatory, per-user timeout.
+
+User added: requests can be partially filled (e.g., large deposit split across multiple calls).
+
+Per-user timeout: low complexity increase — each request stores timestamp, reclaim checks per-request, keeper skips reclaimed entries in FIFO.
+
+### Recorded
+1. ✓ Partial epoch processing → FIFO, including partial fills of individual requests
+2. ✓ Per-user timeout → each request has own deadline, replaces epoch-level timeout
+
+### Check
+No consistency issues. Per-user timeout supersedes epoch-level timeout from [d:keeper-timeout].
+
+---
+
+## Round 14
+
+### Presented
+Gap resolution (7 gaps from SUMMARIZE):
+1. → Keeper emergency redeem entry point? → Via Vault.forceRedeem, keeper+guardian both allowed
+2. → Max leverage ratio enforcement? → Strategy.deposit checks post-leverage LTV, per-vault param
+3. → FlashLoanRouter per-provider callback signatures? → Implementation detail
+4. → Oracle interface? → Implementation detail (ADR DT-002)
+5. → FlashLoanRouter.executeFlashLoan access? → Open, transient storage sufficient
+6. → Beacon ownership? → Same admin as Factory
+7. → redeemCustom token flow? → MigrationRouter transfers baseToken to Strategy before call
+
+### User response
+1. "может, лучше сделать оба через strategy? Зачем vault про это знать вообще?" — both keeper and guardian call Strategy.emergencyRedeem directly, remove Vault.forceRedeem.
+2-7: accepted.
+
+### Discussion
+#1: User pointed out Vault doesn't need to know about emergency unwind — it's a Strategy concern. NAV dynamically computed from getPosition(), so unwound state reflected automatically. Agreed: remove Vault.forceRedeem, both roles call Strategy.emergencyRedeem directly.
+#3: Explained FlashLoanRouter normalizes per-provider callbacks (Aave executeOperation, Balancer receiveFlashLoan, Morpho onMorphoFlashLoan) into unified initiator.onFlashLoan(). Provider-side signatures are implementation detail.
+
+### Recorded
+1. ✓ Emergency redeem → Strategy.emergencyRedeem directly, no Vault wrapper
+2. ✓ Max LTV → Strategy.deposit checks, per-vault param, admin-settable
+3. ✓ FlashLoanRouter callbacks → implementation detail, normalized interface
+4. ✓ Oracle interface → implementation detail (ADR DT-002)
+5. ✓ FlashLoanRouter.executeFlashLoan → open access, transient storage sufficient
+6. ✓ Beacon ownership → same admin as Factory
+7. ✓ redeemCustom token flow → MigrationRouter transfers baseToken to Strategy before call
+
+### Check
+No consistency issues. Vault.forceRedeem removed from naming convention, emergency handled at Strategy level.
+
+[Round 14] Resolved: 69 | Suggested: 0 | Open: 0
+
+---
