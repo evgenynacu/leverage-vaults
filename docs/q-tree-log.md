@@ -1,0 +1,351 @@
+# Q-Tree Session Log
+
+Goal: Leveraged DeFi vault — buy YBT with leverage via Aave/Morpho/Euler, flash loan entry/exit, one vault per strategy, cross-strategy migration.
+Started: 2026-03-11
+
+---
+
+## Round 1
+
+### Presented
+Decomposing: "Leveraged YBT Vault Architecture"
+1. → Contract decomposition? → Vault + LendingAdapter + FlashLoanRouter + Factory
+2. → Leverage mechanism? → Flash loan single-tx
+3. ? Share accounting and NAV? — sync ERC4626 / async epochs / hybrid
+4. → YBT acquisition abstraction? → Pluggable SwapAdapter per YBT type
+5. → Cross-strategy migration? → Atomic collateral swap via MigrationRouter
+6. ? LTV and liquidation risk management? — keeper rebalance / on-chain automation
+7. → Protocol extensibility? → ILendingAdapter interface + beacon proxy
+
+### User response
+1 deferred (need more info), 2 ok, 3 async epochs (keeper provides calldata, shares auto-sent), 4 keeper provides calldata+router contracts verify no losses, 5 yes but need to define deposit/withdraw flows, 6 keeper monitors + guardian last-resort, 7 deferred
+
+### Recorded
+1. ? Contract decomposition → deferred
+2. ✓ Leverage mechanism → flash loan single-tx
+3. ✓ Share accounting → async epochs, keeper calldata, shares auto-sent
+4. ✓ YBT acquisition → keeper calldata+router, contracts verify no losses
+5. ✓ Cross-strategy migration → atomic collateral swap, flows TBD
+6. ✓ LTV risk → keeper monitors + guardian last-resort
+7. ? Protocol extensibility → deferred
+Auto-closed: none
+
+### Check
+3 WARNINGs: oracle strategy undefined, keeper trust concentration, migration scalability for large positions.
+3 INFOs: no circuit breaker, irreversible auto-send, flash loan provider selection.
+Sensitive: async epoch model affects nearly all other decisions; "verify no losses" mechanism is load-bearing for security.
+
+---
+
+## Round 2
+
+### Presented
+Decomposing: "Async epochs" + "Cross-strategy migration"
+1. → NAV snapshot timing? → Post-leverage, at realized values
+2. → Pending deposits treatment? → Idle in vault, no yield, no risk
+3. → Cancel pending deposit? → Yes, before epoch settles
+4. → Keeper liveness fallback? → Timeout + user self-serve reclaim
+5. → Migration authorization? → Governance proposes, keeper executes
+6. → Destination vault intake? → Standard deposit flow, no special path
+7. ? Migration granularity? — whole vault / per-user opt-in
+
+### User response
+1 delta NAV post-leverage (fair to existing holders), 2 yes idle no shares no yield, 3 ok, 4 ok, 5 override: owner of position or approved address (no governance), 6 asked for clarification
+
+### Discussion
+Agent explained destination vault intake options: standard flow (epoch queue) vs special migration path.
+User proposed third option: depositCustom — permissionless function that accepts collateral, supplies to lending, borrows debt back to caller, mints shares via delta NAV. No trust needed between vaults.
+Agent analyzed: clever but creates sync entry path bypassing async safety. Security concerns: oracle manipulation, reentrancy, collateral validation. User confirmed direction.
+
+### Recorded
+1. ✓ NAV snapshot → delta NAV post-leverage
+2. ✓ Pending deposits → idle, no shares, no yield
+3. ✓ Cancel pending → yes, before epoch settles
+4. ✓ Keeper timeout → timeout + user reclaim
+5. ✓ Migration auth → position owner or approved address
+6. ✓ Destination intake → depositCustom (permissionless, sync delta NAV)
+7. ✓ Migration granularity → per-user
+Auto-closed: none (parent has open security sub-questions)
+
+### Check
+2 BLOCKERs: depositCustom bypasses async safety (oracle arbitrage), reentrancy from debt callback.
+4 WARNINGs: per-user migration LTV impact, donation attack variant, collateral validation gap, interest accrual gaming.
+2 INFOs: needs redeemCustom on source vault (hidden prereq), keeper liveness during cascade migrations.
+Sensitive: depositCustom is most architecturally impactful — creates parallel sync entry path.
+
+---
+
+## Round 3
+
+### Presented
+Decomposing: "depositCustom security" + "Withdrawal flow"
+1. → Oracle protection for sync delta NAV? → Circuit breaker + arithmetic NAV validation
+2. → Reentrancy from debt callback? → EIP-1153 transient lock + CEI ordering
+3. → depositCustom access control? → Permissionless with full guard stack
+4. → Async or sync withdrawal? → Async epoch, mirrors deposit model
+5. → Who provides unwind calldata? → Keeper, same as deposit
+6. → Partial withdrawal support? → Share-denominated partial, pro-rata unwind
+7. → Share timelock for depositCustom shares? → Timelock only for depositCustom-minted shares
+
+### User response
+1-3 postponed (need more context), 4 async epoch proportional, 5 ok, 6 ok (didn't fully get), 7 didn't understand why needed
+
+### Discussion
+Agent explained #6: partial withdrawal = user specifies shares (not dollars), keeper unwinds proportional position. Same as "proportional" from #4.
+Agent explained #7: without timelock, depositCustom shares can be deposited+withdrawn in same tx = oracle arbitrage. But user asked: wouldn't it be simpler to restrict depositCustom/withdrawCustom to MigrationRouter only? Agent agreed — restricting access eliminates timelock need, reduces oracle surface, simplifies reentrancy. User confirmed.
+
+### Recorded
+1. ? Oracle protection → deferred (simpler with restricted access)
+2. ? Reentrancy → deferred (simpler with known caller)
+3. ✓ depositCustom/withdrawCustom access → only MigrationRouter, set by factory
+4. ✓ Async withdrawal → async epochs, proportional
+5. ✓ Unwind calldata → keeper provides
+6. ✓ Partial withdrawal → share-denominated, pro-rata
+7. ✗ Share timelock → not needed (depositCustom restricted to MigrationRouter)
+Auto-closed: ✓ Withdrawal flow (all children resolved)
+
+### Check
+Pending (Round 3 check deferred to next round due to discussion-driven changes).
+
+---
+
+## Round 4
+
+### Presented
+Decomposing: "Fee model" + "Emergency/pause"
+1. → Where are fees charged? → Performance fee on yield only
+2. → How are fees collected? → Mint shares to fee recipient (dilution)
+3. → Fee on migration? → No fee, migration is position transfer
+4. → Pause scope? → Deposits, withdrawals, migrations stopped; keeper exempt
+5. → Who can pause? → Guardian immediate + governance timelock
+6. → User recourse when paused? → Emergency withdrawal after delay, then force-unwind
+7. → Force-unwind without keeper? → Simplified on-chain path + permissionless escalation
+
+### User response
+1-3: no fees at all, can add performance fee via wrapper later. 4 ok. 5 override: guardian + admin, no governance (can add OZ timelock later). 6 ok. 7 deferred.
+
+### Recorded
+1. ✓ Fees → none, add via wrapper later
+2. ✗ Fee collection → N/A
+3. ✗ Fee on migration → N/A
+4. ✓ Pause scope → deposits/withdrawals/migrations stopped, keeper exempt
+5. ✓ Pause auth → guardian + admin (governance via OZ timelock later)
+6. ✓ User recourse → emergency withdrawal after delay, then force-unwind
+7. ? Force-unwind → deferred
+Auto-closed: ✓ Fee model (no fees)
+
+### Check
+Previous BLOCKERs resolved by MigrationRouter restriction.
+WARNINGs: "verify no losses" still undefined, migration assumes same debt token, withdrawCustom share burning spec.
+INFOs: pending withdrawal + migration race condition (fix: revert if pending requests).
+No new blockers.
+
+---
+
+## Round 5
+
+### Presented
+Decomposing: "Contract decomposition" + "Swap verification"
+1. → Concrete contracts? → Vault, LendingAdapter, FlashLoanRouter, MigrationRouter, Factory
+2. → Leverage orchestration location? → FlashLoanRouter, not vault
+3. → Adapter ownership? → Own adapter instance per vault
+4. → "No losses" invariant? → received >= oracleValue * (1 - toleranceBps)
+5. → Tolerance configuration? → Per-vault admin parameter with hard ceiling
+6. → Oracle scope for verification? → Reuse NAV oracle, floor check only
+7. → Migration swap verification? → MigrationRouter verifies YBT conversion output
+
+### User response
+1 override: Vault (accounting) + Strategy (abstract + inheritance, orchestrates leverage/lending) + MigrationRouter + Factory + FlashLoanRouter (per provider, interface adapters). No separate LendingAdapter.
+2 asked for deeper analysis. Agent presented 4 options (A: Strategy orchestrates, B: FlashLoanRouter, C: Vault, D: Strategy w/o router). User chose A.
+3 override: no separate LendingAdapter, inline in Strategy via inheritance.
+4 ok. 5 asked "tolerance of what?" — agent explained (max slippage vs oracle price). User: per-vault. 6 asked to expand — agent explained NAV oracle reused as safety floor. User: ok. 7 ok.
+
+### Discussion
+Agent explained tolerance = max acceptable slippage relative to oracle price on swaps.
+Agent explained oracle scope = same oracle used for NAV, but only as floor check for swaps, not for share pricing.
+Agent presented 4 options for orchestration with pros/cons. User chose Strategy orchestrates (option A).
+
+### Recorded
+1. ✓ Contracts → Vault + Strategy (abstract+inheritance) + MigrationRouter + Factory + FlashLoanRouter
+2. ✓ Orchestration → Strategy orchestrates everything, vault only accounting
+3. ✓ No LendingAdapter → inline in Strategy
+4. ✓ No losses invariant → oracle-derived floor
+5. ✓ Tolerance → per-vault (different oracles/slippage per pair)
+6. ✓ Oracle scope → reuse NAV oracle for swap floor
+7. ✓ Migration verification → MigrationRouter verifies
+Auto-closed: ✓ Contract decomposition, ✓ Swap verification
+
+### Check
+Pending (inline below).
+
+---
+
+## Round 6
+
+### Presented
+Decomposing: all remaining open questions (oracle protection, reentrancy, force-unwind, extensibility)
+1. → Arithmetic NAV validation? → expectedDelta = oracleValue(collateral) - debt, revert on deviation
+2. → Interest accrual before snapshot? → Strategy._forceAccrue() before navBefore
+3. → Reentrancy lock scope? → Vault-level EIP-1153
+4. → Guardian unwind? → Guardian provides calldata, same interface as keeper
+5. → Permissionless escalation? → Anyone calls forceUnwind after extended delay
+6. → Adding new lending protocols? → New Strategy subclass + beacon + factory
+7. → Adding new flash loan providers? → New FlashLoanRouter + admin registers
+
+### User response
+1 asked for explanation. 2 asked for explanation. 3 asked for explanation. 4 ok. 5 proposed bigger change: sync permissionless redeem available ALWAYS (not just when paused). User provides calldata for proportional exit. 6 ok. 7 ok.
+
+### Discussion
+Agent explained #1 (sanity check: expected delta matches actual delta), #2 (lazy interest accrual inflates deltaNAV), #3 (EIP-1153 mutual exclusion flag).
+For #5: user proposed any user can redeem at any time with own calldata. Agent analyzed: proportional exit preserves LTV (safe for remaining users), no oracle needed for split (pure pro-rata), oracle only for swap floor check. This makes async withdrawal optional (gas optimization, not required path). Fundamentally changes emergency model — users never trapped.
+User confirmed sync permissionless redeem as alternative path.
+
+### Recorded
+1. ✓ Arithmetic NAV validation → expectedDelta check
+2. ✓ Interest accrual before snapshot → _forceAccrue() must have
+3. ✓ Reentrancy lock → vault-level EIP-1153
+4. ✓ Guardian unwind → guardian provides calldata
+5. ✓ Sync permissionless redeem → always available, user provides calldata
+6. ✓ New lending protocols → Strategy subclass + beacon + factory
+7. ✓ New flash loan providers → new FlashLoanRouter + admin registers
+Auto-closed: ✓ Oracle protection, ✓ Reentrancy, ✓ Force-unwind, ✓ Protocol extensibility, ✓ Leveraged YBT Vault Architecture (ROOT)
+
+### Check
+Pending (final check below).
+
+---
+
+## Round 7 — Gap Resolution (Batch 1)
+
+### Presented
+Resolving 7 of 12 gaps found during summarization:
+1. → Base token vs debt token? → Always the same token
+2. → Post-force-unwind redeem? → Same as usual redeem (idle cash returned)
+3. → guardianUnwindDelay and permissionless escalation? → Not needed with sync redeem
+4. → MigrationRouter upgrade path? → Immutable, Factory.setMigrationRouter
+5. → Epoch queue separation? → Separate processEpoch per direction
+6. → Tolerance ceiling? → Hard ceiling, 500 bps suggested
+7. → Keeper rebalance flow? → Partial unwind/re-leverage via flash loan
+
+### User response
+1 Y. 2 same as usual redeem, no extra mechanism needed. 3 don't need delays — sync redeem + async redeemRequest are exit paths. 4 Y. 5 Y. 6 ok but 500 bps too much, 100 bps. 7 no rebalance at all — only emergency unwind by keeper on drawdown/low HF. 3 clarification: exit = sync redeem or redeemRequest.
+
+### Discussion
+User simplified emergency model further: no force-unwind delays or permissionless escalation needed since sync redeem is always available. Emergency unwind replaces rebalance — keeper triggers full unwind on health factor issues, no partial LTV adjustment.
+
+### Recorded
+1. ✓ Base token = debt token → always identical
+2. ✓ Post-unwind redeem → same as usual redeem, returns idle cash
+3. ✓ Force-unwind delays → not needed, sync redeem + redeemRequest sufficient
+4. ✓ MigrationRouter upgrade → immutable, Factory.setMigrationRouter
+5. ✓ Epoch separation → separate processEpoch calls per direction
+6. ✓ Tolerance ceiling → 100 bps hard ceiling
+7. ✓ Risk management → no rebalance, emergency unwind only (keeper on drawdown/low HF)
+Auto-closed: none (gap resolution, no parent changes)
+
+### Check
+No consistency issues. Changes are simplifications — removal of complexity (delays, rebalance) rather than new features.
+
+---
+
+## Round 7 — Gap Resolution (Batch 2)
+
+### Presented
+Resolving remaining 5 gaps:
+1. → Vault upgradeability? → Beacon proxy, same as Strategy
+2. → Admin transfer/renounce? → OZ Ownable2Step, renounce disabled
+3. → Sync redeem idle mode? → Skip flash loan, return shares/totalSupply * idleBase
+4. → Partial migration? → Yes, user specifies share count
+5. → Factory deployment validation? → Oracle reachable, market valid, tolerance <= ceiling, token match
+
+### User response
+1 Y. 2 Y. 3 yes, if only idle then no flash loan needed. 4 Y. 5 asked for details, then accepted.
+
+### Recorded
+1. ✓ Vault upgradeability → beacon proxy
+2. ✓ Admin transfer → Ownable2Step, renounce disabled
+3. ✓ Sync redeem idle mode → skip flash loan, pro-rata idle
+4. ✓ Partial migration → yes, user specifies share count
+5. ✓ Factory validation → oracle, market, tolerance, token match
+Auto-closed: none
+
+### Check
+No consistency issues. All 12 gaps from summarization are now resolved.
+
+---
+
+## Round 8 — Gap Resolution (SUMMARIZE #2)
+
+### Presented
+Re-ran SUMMARIZE phase. 14 gaps found: 11 implementation-level (access control guards), 3 architecture-level:
+1. → First-depositor / donation attack? → Virtual shares + minimum first deposit
+2. → Rounding direction? → Round down mint, round up burn
+3. → Minimum deposit/withdrawal? → Admin-settable minimum deposit
+
+### User response
+1 virtual shares don't work for delta NAV — better to track balances internally (not balanceOf). 2 Y. 3 minimum for withdrawal too (anti-dust for keeper gas). Asked what other purpose — answered: anti-dust + rounding protection, nothing else.
+
+### Discussion
+Internal balance tracking: with delta NAV, donation attack = manipulating reported balances between navBefore/navAfter. Internal tracking neutralizes this. Virtual shares irrelevant because shares aren't priced via totalAssets/totalSupply.
+
+### Recorded
+1. ✓ Donation attack protection → internal balance tracking (not balanceOf)
+2. ✓ Rounding → round down mint, round up burn (favor vault)
+3. ✓ Minimum amounts → admin-settable min for both deposit and withdrawal
+Auto-closed: none
+
+### Check
+No consistency issues.
+
+---
+
+## Round 8 — Gap Resolution (continued)
+
+### Presented
+1. → First-depositor rounding protection? → Dead shares (mint to address(1))
+
+### User response
+Asked: "А minimum deposit не покроет этот риск?" — whether minimum deposit is sufficient instead of dead shares.
+
+### Discussion
+Analyzed: classic ERC4626 donation attack doesn't apply (delta NAV + internal tracking). Remaining risk = rounding precision in pro-rata when totalSupply small. With 18-decimal shares, minimum deposit of 1 base unit creates ~1e18 shares — sufficient precision. Dead shares unnecessary. Edge case of totalSupply returning to 0 is safe under delta NAV.
+
+### Recorded
+1. ✓ First-depositor protection → minimum deposit sufficient, dead shares not needed
+Auto-closed: none
+
+### Check
+No consistency issues. Last architecture gap resolved.
+
+---
+
+## Round 9 — Gap Resolution (SUMMARIZE #3)
+
+### Presented
+Re-ran SUMMARIZE with updated summarizer (interfaces.md, state vars, postconditions, parameter sufficiency check). 5 gaps found, all FlashLoanRouter/MigrationRouter flash loan mechanics:
+1. → FlashLoanRouter invariants
+2. → FlashLoanRouter state
+3. → Flash loan callback flow
+4. → Migration flash loan source
+5. → Migration flash loan amount
+
+### User response
+1 asked for details, then accepted. 2 Y. 3 Y + noted MigrationRouter also uses flash loan (both callers). 4 Y. 5 Y.
+
+### Discussion
+FlashLoanRouter callback needs to support two callers: Strategy and MigrationRouter. Initiator stored in transient storage, callback forwards to initiator.onFlashLoan(). Both implement same callback interface.
+
+Also recorded separately (user-initiated, not from gap): depositCustom needs explicit debtAmount parameter — MigrationRouter knows flash loan amount, Strategy shouldn't guess.
+
+### Recorded
+1. ✓ FlashLoanRouter invariants → no residual, validated callback, single at a time
+2. ✓ FlashLoanRouter state → transient storage only, no persistent state
+3. ✓ Flash loan callback → Provider → FlashLoanRouter → initiator.onFlashLoan() (Strategy or MigrationRouter)
+4. ✓ Migration flash loan source → MigrationRouter calls FlashLoanRouter directly
+5. ✓ Migration flash loan amount → shares/totalSupply * trackedDebt from source vault
+Auto-closed: none
+
+### Check
+No consistency issues.
+
+---
