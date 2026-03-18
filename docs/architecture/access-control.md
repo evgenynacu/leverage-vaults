@@ -4,7 +4,7 @@
 
 ## Roles
 
-- **Admin** — OZ Ownable2Step, renounce disabled. Can pause, configure parameters, upgrade beacons, set MigrationRouter. Same admin owns all beacons (Vault, Strategy) [d:beacon-owner].
+- **Admin** — OZ Ownable2Step, renounce disabled. Can pause, configure parameters, upgrade beacons, set MigrationRouter. Same admin owns all beacons (Vault, Strategy, FlashLoanRouter) [d:beacon-owner].
 - **Guardian** — Can pause immediately, call Strategy.emergencyRedeem directly. Separate from admin for operational flexibility.
 - **Keeper** — Processes epochs, can call Strategy.emergencyRedeem directly. No admin privileges. Provides FlashLoanRouter per-call.
 - **MigrationRouter** — Authorized contract, set by Factory at deployment (updatable by admin). Calls depositCustom/redeemCustom on Vault.
@@ -23,13 +23,12 @@
 | processRedeems | Vault | keeper | onlyKeeper, reentrancyLock, isRegisteredRouter |
 | depositCustom | Vault | MigrationRouter | onlyMigrationRouter, reentrancyLock, whenNotPaused |
 | redeemCustom | Vault | MigrationRouter | onlyMigrationRouter, reentrancyLock, whenNotPaused, no pending redeem |
-| pause | Vault | admin | onlyAdmin |
-| guardianPause | Vault | guardian, admin | onlyGuardianOrAdmin |
+| pause | Vault | guardian, admin | onlyGuardianOrAdmin |
 | unpause | Vault | admin | onlyAdmin |
-| setTolerance | Vault | admin | onlyAdmin, <= 100 bps ceiling |
+| setTolerance | Vault | admin | onlyAdmin, <= toleranceCeiling (100 bps) |
 | setMigrationRouter | Vault | admin | onlyAdmin |
-| setMinDepositAmount | Vault | admin | onlyAdmin |
-| setMinRedeemAmount | Vault | admin | onlyAdmin |
+| setMinDeposit | Vault | admin | onlyAdmin |
+| setMinRedeem | Vault | admin | onlyAdmin |
 | setGuardian | Vault | admin | onlyAdmin |
 | setKeeper | Vault | admin | onlyAdmin |
 | deposit | Strategy | vault | onlyVault |
@@ -47,10 +46,9 @@
 | onFlashLoan | MigrationRouter | FlashLoanRouter | validates via transient storage |
 | deploy | Factory | admin | onlyAdmin, on-chain validation |
 | setMigrationRouter | Factory | admin | onlyAdmin |
-| setStrategyBeacon | Factory | admin | onlyAdmin |
-| setVaultBeacon | Factory | admin | onlyAdmin |
 | registerRouter | Factory | admin | onlyAdmin |
 | deregisterRouter | Factory | admin | onlyAdmin |
+| isRegisteredRouter | Factory | anyone | — (view) |
 | transferOwnership | Vault/Strategy/Factory | admin | Ownable2Step (propose + accept) |
 | renounceOwnership | Vault/Strategy/Factory | — | disabled (reverts) |
 

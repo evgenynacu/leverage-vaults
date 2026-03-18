@@ -5,9 +5,9 @@ pragma solidity ^0.8.0;
 interface IFactory {
     // --- Deployment ---
 
-    // onlyAdmin
     // Deploy a new Vault + Strategy pair as beacon proxies
-    // Validates: oracle reachable, lending market valid, tolerance <= ceiling, baseToken matches debt token
+    // Validates: oracle reachable, market valid, tolerance <= ceiling, token match
+    // ACCESS: onlyAdmin
     function deploy(
         bytes32 protocolId,
         address baseToken,
@@ -15,48 +15,35 @@ interface IFactory {
         address oracle,
         uint256 toleranceBps,
         uint256 maxLTV,
-        uint256 minDepositAmount,
-        uint256 minRedeemAmount
+        uint256 minDeposit,
+        uint256 minRedeem,
+        bytes calldata lendingConfig
     ) external returns (address vault, address strategy);
 
-    // --- Admin configuration ---
+    // --- Router registry ---
 
-    // onlyAdmin
-    // Register or update a Strategy beacon for a lending protocol
-    function setStrategyBeacon(bytes32 protocolId, address beacon) external;
-
-    // onlyAdmin
-    // Set the Vault beacon
-    function setVaultBeacon(address beacon) external;
-
-    // onlyAdmin
-    // Update MigrationRouter address (used for new deployments)
-    function setMigrationRouter(address newRouter) external;
-
-    // --- FlashLoanRouter registry ---
-
-    // onlyAdmin
-    // Add a FlashLoanRouter to the approved set
+    // Register an approved FlashLoanRouter address
+    // ACCESS: onlyAdmin
     function registerRouter(address router) external;
 
-    // onlyAdmin
     // Remove a FlashLoanRouter from the approved set
+    // ACCESS: onlyAdmin
     function deregisterRouter(address router) external;
 
-    // Check if a FlashLoanRouter is approved
+    // Check if a FlashLoanRouter is registered (used by Strategy for per-call validation)
     function isRegisteredRouter(address router) external view returns (bool);
+
+    // --- Configuration ---
+
+    // Set MigrationRouter for new deployments
+    // ACCESS: onlyAdmin
+    function setMigrationRouter(address newMigrationRouter) external;
 
     // --- View ---
 
     // Current MigrationRouter address
     function migrationRouter() external view returns (address);
 
-    // Vault beacon address
-    function vaultBeacon() external view returns (address);
-
-    // Strategy beacon for a given protocol
-    function strategyBeacons(bytes32 protocolId) external view returns (address);
-
-    // Check if a vault address was deployed by this factory
-    function isRegistered(address vault) external view returns (bool);
+    // Tolerance ceiling constant (100 bps)
+    function toleranceCeiling() external view returns (uint256);
 }

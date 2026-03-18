@@ -5,124 +5,123 @@ pragma solidity ^0.8.0;
 interface IVault {
     // --- User actions ---
 
-    // Request async deposit of baseToken into the vault
-    function requestDeposit(uint256 amount) external;
+    // Request async deposit of baseToken; returns requestId for cancellation
+    // ACCESS: anyone (whenNotPaused)
+    function requestDeposit(uint256 amount) external returns (uint256 requestId);
 
-    // Cancel a pending (unprocessed) deposit request, returns baseToken to user
+    // Cancel a pending unprocessed deposit request; refunds baseToken to caller
+    // ACCESS: request owner only
     function cancelDeposit(uint256 requestId) external;
 
-    // Request async redeem; shares escrowed (transferred to vault) at request time
-    function requestRedeem(uint256 shares) external;
+    // Request async redeem; shares escrowed to vault; returns requestId for cancellation
+    // ACCESS: anyone (whenNotPaused)
+    function requestRedeem(uint256 shares) external returns (uint256 requestId);
 
-    // Cancel a pending (unprocessed) redeem request, returns escrowed shares to user
+    // Cancel a pending unprocessed redeem request; returns escrowed shares to caller
+    // ACCESS: request owner only
     function cancelRedeem(uint256 requestId) external;
 
-    // Sync permissionless redeem: user provides calldata, burns shares, unwinds proportional position
-    // Always available even when paused; skip flash loan if position fully unwound (idle mode)
-    // flashLoanRouter validated against Factory registry
-    function syncRedeem(uint256 shares, bytes calldata swapCalldata, address swapRouter, address flashLoanRouter) external;
+    // Sync permissionless redeem: user provides calldata, burns shares, receives baseToken
+    // Always available even when paused
+    // ACCESS: anyone
+    function syncRedeem(
+        uint256 shares,
+        bytes calldata swapCalldata,
+        address swapRouter,
+        address flashLoanRouter
+    ) external returns (uint256 baseTokenOut);
 
     // --- Keeper actions ---
 
-    // onlyKeeper
-    // Process deposit queue FIFO: leverage up to `amount` of baseToken, mint shares via delta NAV
-    // flashLoanRouter validated against Factory registry
-    function processDeposits(uint256 amount, bytes calldata swapCalldata, address swapRouter, address flashLoanRouter) external;
+    // Process pending deposit requests FIFO; keeper provides swap calldata and amount to deploy
+    // ACCESS: onlyKeeper
+    function processDeposits(
+        uint256 amount,
+        bytes calldata swapCalldata,
+        address swapRouter,
+        address flashLoanRouter
+    ) external;
 
-    // onlyKeeper
-    // Process redeem queue FIFO: unwind up to `shares` worth of position, distribute baseToken pro-rata
-    // flashLoanRouter validated against Factory registry
-    function processRedeems(uint256 shares, bytes calldata swapCalldata, address swapRouter, address flashLoanRouter) external;
+    // Process pending redeem requests FIFO; keeper provides swap calldata and shares to unwind
+    // ACCESS: onlyKeeper
+    function processRedeems(
+        uint256 shares,
+        bytes calldata swapCalldata,
+        address swapRouter,
+        address flashLoanRouter
+    ) external;
 
     // --- Migration actions (MigrationRouter only) ---
 
-    // onlyMigrationRouter
-    // Sync deposit for migration: supply collateral, borrow debtAmount, send debt to caller, mint shares via arithmetic NAV validation
-    function depositCustom(address user, uint256 collateralAmount, uint256 debtAmount) external;
+    // Accept collateral from migration, supply + borrow, mint shares to user
+    // ACCESS: onlyMigrationRouter
+    function depositCustom(
+        address user,
+        uint256 collateralAmount,
+        uint256 debtAmount
+    ) external returns (uint256 sharesMinted);
 
-    // onlyMigrationRouter
-    // Sync redeem for migration: caller transfers baseToken to Strategy first, then burns shares, repays proportional debt, withdraws proportional collateral to caller
-    // Reverts if user has pending redeem requests
-    function redeemCustom(address user, uint256 shares) external;
+    // Burn user shares, repay debt + withdraw collateral to MigrationRouter
+    // Vault computes fraction = shares/totalSupply, passes to Strategy
+    // Precondition: MigrationRouter has transferred baseToken to Strategy before this call
+    // ACCESS: onlyMigrationRouter
+    function redeemCustom(
+        address user,
+        uint256 shares
+    ) external returns (uint256 collateralOut);
 
     // --- Admin actions ---
 
-    // onlyAdmin
-    // Pause deposits, new requests, and migrations; sync redeem + keeper remain active
+    // Pause deposits, async redeems, and migrations (sync redeem unaffected)
+    // ACCESS: onlyGuardianOrAdmin
     function pause() external;
 
-    // onlyAdmin
-    // Unpause vault
+    // Unpause the vault
+    // ACCESS: onlyAdmin
     function unpause() external;
 
-    // onlyAdmin
-    // Set swap tolerance in basis points (ceiling enforced: <= 100 bps)
+    // Set swap tolerance in basis points (max toleranceCeiling)
+    // ACCESS: onlyAdmin
     function setTolerance(uint256 newToleranceBps) external;
 
-    // onlyAdmin
     // Set minimum deposit amount
-    function setMinDepositAmount(uint256 newMin) external;
+    // ACCESS: onlyAdmin
+    function setMinDeposit(uint256 newMinDeposit) external;
 
-    // onlyAdmin
-    // Set minimum redeem amount (in shares)
-    function setMinRedeemAmount(uint256 newMin) external;
+    // Set minimum redeem shares
+    // ACCESS: onlyAdmin
+    function setMinRedeem(uint256 newMinRedeem) external;
 
-    // onlyAdmin
-    // Update MigrationRouter address for this vault
-    function setMigrationRouter(address newRouter) external;
+    // Set MigrationRouter address
+    // ACCESS: onlyAdmin
+    function setMigrationRouter(address newMigrationRouter) external;
 
-    // onlyAdmin
-    // Set guardian address (can pause)
+    // Set guardian address
+    // ACCESS: onlyAdmin
     function setGuardian(address newGuardian) external;
 
-    // onlyAdmin
-    // Set keeper address (processes epochs)
+    // Set keeper address
+    // ACCESS: onlyAdmin
     function setKeeper(address newKeeper) external;
 
-    // --- Guardian actions ---
+    // --- View (used by other contracts or specs) ---
 
-    // onlyGuardianOrAdmin
-    // Pause vault (guardian can pause but not unpause per standard pattern)
-    function guardianPause() external;
-
-    // --- View ---
-
-    // Total NAV: oracleValue(actualCollateral) - actualDebt (after _forceAccrue)
+    // Total NAV: oracleValue(actualCollateral) - actualDebt + idleBaseToken
+    // Used by: delta NAV calculation in processDeposits/depositCustom, specs
     function totalAssets() external view returns (uint256);
 
-    // Total shares outstanding
+    // ERC-20 totalSupply of shares
     function totalSupply() external view returns (uint256);
 
-    // Share balance of an account
+    // ERC-20 share balance of account
     function balanceOf(address account) external view returns (uint256);
 
-    // Strategy address paired with this vault
-    function strategy() external view returns (address);
-
-    // Factory address (for FlashLoanRouter registry validation)
-    function factory() external view returns (address);
-
-    // Current oracle address
-    function oracle() external view returns (address);
-
-    // Current tolerance in basis points
-    function toleranceBps() external view returns (uint256);
-
-    // Whether the vault is paused
+    // Whether vault is paused
     function paused() external view returns (bool);
 
-    // Current MigrationRouter address
-    function migrationRouter() external view returns (address);
+    // Strategy address
+    function strategy() external view returns (address);
 
-    // Guardian address
-    function guardian() external view returns (address);
-
-    // Keeper address
-    function keeper() external view returns (address);
-
-    // Minimum deposit amount
-    function minDepositAmount() external view returns (uint256);
-
-    // Minimum redeem amount in shares
-    function minRedeemAmount() external view returns (uint256);
+    // Factory address
+    function factory() external view returns (address);
 }

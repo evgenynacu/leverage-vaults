@@ -3,24 +3,17 @@
 pragma solidity ^0.8.0;
 
 interface IMigrationRouter {
-    // --- User actions ---
-
-    // Migrate shares from source vault to destination vault via flash loan
-    // User must approve MigrationRouter to transfer their source vault shares (or be msg.sender)
-    // Partial migration supported: user specifies share count
-    // Source and destination vaults must share the same baseToken (debt token)
-    // flashLoanRouter validated against Factory registry
+    // Migrate shares from source vault to destination vault atomically via flash loan
+    // User specifies share count for partial migration
+    // Precondition: user must have approved MigrationRouter to transfer shares (or vault handles escrow)
+    // swapCalldata/swapRouter used for YBT conversion if source and dest YBT differ
+    // ACCESS: anyone (user initiates for own shares, or approved address)
     function migrate(
         address sourceVault,
         address destVault,
         uint256 shares,
-        address flashLoanRouter,
         bytes calldata swapCalldata,
-        address swapRouter
+        address swapRouter,
+        address flashLoanRouter
     ) external;
-
-    // --- Flash loan callback ---
-
-    // Called by FlashLoanRouter during migration flash loan execution
-    function onFlashLoan(address token, uint256 amount, uint256 fee, bytes calldata data) external;
 }

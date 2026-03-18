@@ -4,10 +4,10 @@
 
 ## Vault
 
-- I1: totalSupply > 0 implies nav() > 0 (shares exist only if there is a position or idle balance)
+- I1: totalSupply > 0 implies totalAssets() > 0 (shares exist only if there is a position or idle balance)
 - I2: Pending deposit funds excluded from totalAssets/NAV (idle, no yield, no risk)
-- I3: Escrowed redeem shares held by vault contract (transferred at requestRedeem time, prevents double-exit via sync redeem)
-- I4: toleranceBps <= 100 (hard ceiling, enforced on set and at deployment)
+- I3: Escrowed redeem shares held by vault contract (transferred at requestRedeem, prevents double-exit via sync redeem)
+- I4: toleranceBps <= toleranceCeiling (100 bps), enforced on set and at deployment
 - I5: For any swap: amountReceived >= oracleValue(amountSent) * (10000 - toleranceBps) / 10000
 - I6: depositCustom/redeemCustom callable only by migrationRouter address
 - I7: processDeposits/processRedeems callable only by keeper
@@ -16,13 +16,13 @@
 - I10: Shares minted round down; assets returned on burn round down (favor vault)
 - I11: All deposit/redeem amounts >= configured minimums (requestDeposit, requestRedeem, syncRedeem, depositCustom/redeemCustom share count)
 - I12: depositCustom arithmetic NAV check: |actualNavDelta - expectedNavDelta| <= roundingToleranceBps, where expectedDelta = oracleValue(collateralAmount) - debtAmount
-- I13: _forceAccrue() called before any position read (depositCustom, redeemCustom, processDeposits, processRedeems, syncRedeem, emergencyRedeem, migration flash loan amount)
+- I13: _forceAccrue() called before any position read (all flows that compute NAV or fraction)
 - I14: Transient storage reentrancy lock active during depositCustom, redeemCustom, processDeposits, processRedeems, syncRedeem (mutual exclusion)
 - I15: redeemCustom reverts if user has pending redeem requests
 - I16: Cancel deposit/redeem only possible for requests not yet fully processed; partially filled requests can be cancelled (unfilled portion returned)
 - I17: FIFO order enforced — keeper cannot cherry-pick or reorder requests
 - I18: Partial fills allowed — processDeposits fills by amount, processRedeems fills by shares; last request may be partially filled with remainder staying in queue
-- I19: Vault has NO emergency/force redeem function — emergency redeem lives on Strategy
+- I19: Vault has NO forceRedeem function — emergency redeem lives on Strategy
 - I20: Cancel is the only mechanism for unprocessed requests — no timeout, no reclaim, no reclaimDeposit, no reclaimRedeem
 - I21: FlashLoanRouter parameter validated against Factory registry (factory.isRegisteredRouter) in processDeposits, processRedeems, syncRedeem
 
@@ -56,9 +56,9 @@
 - I1: Source and destination vaults must share the same debt token (base token)
 - I2: YBT conversion verified via oracle-floor check (source oracle for outgoing, destination oracle for incoming)
 - I3: Migration only by position owner or approved address
-- I4: Flash loan amount = shares/totalSupply * actualDebt (computed from source vault's Strategy.getPosition() after _forceAccrue)
+- I4: Flash loan amount = shares/totalSupply * actualDebt (computed from source vault Strategy.getPosition() after _forceAccrue)
 - I5: After migration: source shares burned, destination shares minted, flash loan fully repaid
-- I6: debtAmount passed to depositCustom = flash loan amount (MigrationRouter knows the exact size)
+- I6: debtAmount passed to depositCustom = flash loan amount
 - I7: MigrationRouter transfers baseToken to source Strategy before calling redeemCustom
 - I8: Partial migration supported — user specifies share count
 - I9: FlashLoanRouter validated against Factory registry (factory.isRegisteredRouter)
@@ -67,7 +67,7 @@
 
 - I1: Deployment reverts if: oracle unreachable, market invalid, toleranceBps > ceiling, baseToken != debt token in market
 - I2: All validation runs on-chain in the deployment transaction
-- I3: Same admin owns all beacons (Vault, Strategy)
+- I3: Same admin owns all beacons (Vault, Strategy, FlashLoanRouter)
 - I4: Ownable2Step, renounce disabled
 - I5: registeredRouters is admin-managed set of approved FlashLoanRouter addresses
 - I6: isRegisteredRouter returns true only for admin-registered routers

@@ -47,7 +47,7 @@ stateDiagram-v2
 
 | From | To | Trigger | Guard |
 |------|----|---------|-------|
-| * | Pending | requestRedeem(shares) | not paused, shares >= minRedeemAmount |
+| * | Pending | requestRedeem(shares) | not paused, shares >= minRedeemShares |
 | Pending | Filled | processRedeems | keeper, request reached by FIFO, fully covered by shares arg |
 | Pending | PartiallyFilled | processRedeems | keeper, request is last in batch, only partially covered by shares arg |
 | Pending | Cancelled | cancelRedeem(requestId) | msg.sender is request owner |

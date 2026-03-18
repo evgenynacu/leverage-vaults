@@ -12,7 +12,6 @@ sequenceDiagram
     Keeper->>Vault: processDeposits(amount, calldata, swapRouter, flashLoanRouter)
     Vault->>Strategy: deposit(amount, calldata, swapRouter, flashLoanRouter)
     Strategy->>FlashLoanRouter: executeFlashLoan(baseToken, flashAmount, data)
-    FlashLoanRouter->>FlashProvider: flash borrow baseToken
     FlashProvider-->>FlashLoanRouter: baseToken
     FlashLoanRouter->>Strategy: onFlashLoan(token, amount, 0, data)
     Strategy->>DEX: swap baseToken -> YBT (via calldata)
@@ -88,7 +87,7 @@ When position is fully unwound (zero collateral, zero debt), skip flash loan, re
 
 ```mermaid
 sequenceDiagram
-    User->>MigrationRouter: migrate(srcVault, dstVault, shares, flashLoanRouter, swapCalldata, swapRouter)
+    User->>MigrationRouter: migrate(srcVault, dstVault, shares, swapCalldata, swapRouter, flashLoanRouter)
     MigrationRouter->>MigrationRouter: flashAmount = shares/totalSupply * actualDebt (after _forceAccrue)
     MigrationRouter->>FlashLoanRouter: executeFlashLoan(baseToken, flashAmount, data)
     FlashProvider-->>FlashLoanRouter: baseToken
