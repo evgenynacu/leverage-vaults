@@ -57,7 +57,7 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
   - ✓ LTV and liquidation risk management → Emergency unwind only, no rebalance [d:risk]
   - ✓ Protocol extensibility [d:extensibility]
     - ✓ Adding new lending protocols → New Strategy subclass + beacon + factory registration [d:new-protocol]
-    - ✓ Adding new flash loan providers → New FlashLoanRouter + admin registers, existing vaults can switch [d:new-flashloan]
+    - ✓ Adding new flash loan providers → New FlashLoanRouter + admin registers in Factory, keeper picks per-call [d:new-flashloan]
     - ✓ FlashLoanRouter invariants → No token residual, callback validated via transient storage, single at a time [d:flr-invariants]
     - ✓ FlashLoanRouter state → Transient storage for callback validation, no persistent state beyond config [d:flr-state]
     - ✓ Flash loan callback flow → Provider → FlashLoanRouter → initiator.onFlashLoan() (Strategy or MigrationRouter) [d:flash-callback]
@@ -75,12 +75,13 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
   - ✓ Strategy fraction argument → Strategy receives fraction (of 1e18) instead of shares/totalSupply [d:fraction-arg]
   - ✓ Flash loan providers → only zero-fee providers (Balancer, Morpho, etc.) [d:flash-fee]
   - ✓ Swap calldata margin → Caller builds calldata with margin, oracle-floor check validates output [d:swap-margin]
-  - ✓ Partial epoch processing → Keeper processes N requests from FIFO head, including partial fills [d:partial-epoch]
-  - ✓ Per-user timeout → Each request has own deadline for reclaim, not tied to epoch [d:per-user-timeout]
+  - ✓ Partial epoch processing → Amount-based, FIFO, partial fills of last request [d:partial-epoch]
+  - ✗ Per-user timeout → Removed, cancel covers all scenarios [d:per-user-timeout]
   - ✓ Emergency redeem entry point → Keeper and guardian call Strategy.emergencyRedeem directly, no Vault wrapper [d:keeper-emergency]
   - ✓ Max leverage ratio → Strategy.deposit checks post-leverage LTV, per-vault param, admin-settable [d:max-ltv]
   - ✓ FlashLoanRouter per-provider callbacks → Implementation detail, architecture defines normalized interface only [d:flr-callbacks]
   - ✓ Oracle interface → Implementation detail (ADR DT-002 covers OracleRouter + IPriceFeed) [d:oracle-interface]
+  - ✓ FlashLoanRouter selection → Keeper picks per-call from Factory registry, not stored on Strategy [d:flr-selection]
   - ✓ FlashLoanRouter.executeFlashLoan access → Open (anyone can call), transient storage callback validation sufficient [d:flr-access]
   - ✓ Beacon ownership → Same admin as Factory, single owner for all beacons [d:beacon-owner]
   - ✓ redeemCustom token flow → MigrationRouter transfers baseToken to Strategy before calling redeemCustom [d:redeem-custom-flow]
@@ -147,13 +148,13 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 
 ### [d:epoch-separation] Epoch Queue Separation
 - Deposits and withdrawals require separate processEpoch calls — cannot be batched together.
-- processDepositEpoch() and processWithdrawalEpoch() are distinct functions.
+- processDeposits() and processRedeems() are distinct functions.
 - Reason: deposit leverages up (flash loan → buy YBT → supply → borrow), withdrawal unwinds (opposite direction). Opposite token flows cannot be combined.
 
 ### [d:keeper-timeout] Keeper Liveness Fallback
-- Per-user timeout + reclaim — if a request not processed within N time from submission, user calls reclaimDeposit(). Only that request voided.
+- User can cancel any unprocessed request at any time via cancelDeposit/cancelRedeem.
+- No timeout or reclaim mechanism needed — cancel is always available for unprocessed requests.
 - No permissionless settle — too risky (MEV/sandwich without keeper routing optimization).
-- Guardian can also trigger reclaim on behalf of users.
 - Note: with sync permissionless redeem, keeper liveness is less critical for exits (only affects deposits).
 
 ### [d:ybt-types] YBT Types and Acquisition
@@ -344,8 +345,10 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 - Beacon upgrade for bug fixes — admin upgrades beacon, all vaults of that type update atomically.
 
 ### [d:new-flashloan] Adding New Flash Loan Providers
-- Process: write new FlashLoanRouter → deploy → admin registers in Factory.
-- Existing vaults can switch providers via admin function on Strategy (routing choice, not structural).
+- Process: write new FlashLoanRouter → deploy → admin registers in Factory registry.
+- Keeper picks which registered FlashLoanRouter to use per-call (parameter in processDeposits/processRedeems/syncRedeem).
+- Strategy does NOT store a FlashLoanRouter address — validated against Factory registry at call time.
+- Flexibility: keeper chooses provider with best liquidity. If one provider is down, switch to another without admin action.
 - Beacon proxy for FlashLoanRouter — upgrade fixes bugs across all instances.
 
 ### [d:vault-beacon] Vault Upgradeability
@@ -449,7 +452,7 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 - Vault computes fraction = shares * 1e18 / totalSupply, passes to Strategy.
 - Strategy applies fraction to actual position: amount = fraction * actualDebt / 1e18 (same for collateral).
 - Separation of concerns: Vault owns share accounting, Strategy only knows "what portion of the position to process".
-- fraction = 1e18 means full position (used in emergencyRedeem/forceRedeem).
+- fraction = 1e18 means full position (used in emergencyRedeem).
 
 ### [d:flash-fee] Flash Loan Providers — Zero Fee Only
 - Only zero-fee flash loan providers are used (Balancer, Morpho, Aave with 0-fee markets, etc.).
@@ -462,22 +465,21 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 - Reason: on-chain amount may differ due to interest accrual between calldata construction and execution, rounding in pro-rata calculations.
 - Oracle-floor check still validates: amountReceived >= oracleValue(amountSent) * (1 - toleranceBps).
 - Residual dust (difference between actual amount and swap amountIn) stays in Strategy. Accumulates over time.
-- Affected flows: processDeposits (base→YBT), processRedeems (YBT→base), syncRedeem (YBT→base), forceRedeem (YBT→base), emergencyRedeem (YBT→base), migration YBT conversion.
+- Affected flows: processDeposits (base→YBT), processRedeems (YBT→base), syncRedeem (YBT→base), emergencyRedeem (YBT→base), migration YBT conversion.
 
 ### [d:partial-epoch] Partial Epoch Processing
-- Keeper can process N requests from the head of the FIFO queue per call, including just one.
-- Requests can be partially filled — e.g., a large deposit request can be split across multiple keeper calls.
+- Amount-based: processDeposits(amount, ...) and processRedeems(shares, ...).
+- Keeper specifies exact volume to deploy/unwind. Contract iterates FIFO from head, filling requests until amount/shares exhausted.
+- Last request may be partially filled — remainder stays in queue for next call. Partial fill amount tracked per request.
 - FIFO order mandatory — keeper cannot cherry-pick or reorder requests. Prevents censorship and unfair execution.
 - Different batches may get different execution prices — acceptable trade-off, same as requests arriving in different blocks.
 - Use case: large request exceeds available DEX liquidity, keeper processes a portion now and the rest later.
+- amount/shares in function args must match the swap calldata (keeper builds calldata for that exact volume).
 
-### [d:per-user-timeout] Per-User Timeout
-- Each request stores its own submission timestamp.
-- If not processed (even partially) within timeout period, user can call reclaimDeposit() to withdraw.
-- Not tied to epoch — individual requests expire independently.
-- Reclaimed requests create gaps in FIFO queue — keeper skips them (marked as reclaimed).
-- Handles the case where keeper processes other requests but skips a specific one — user is not stuck indefinitely.
-- Replaces epoch-level timeout (which only worked if keeper was fully offline).
+### [d:per-user-timeout] Per-User Timeout (REMOVED)
+- REMOVED: cancel covers all scenarios. User can cancel any unprocessed request at any time.
+- With partial epoch processing (FIFO, amount-based), there is no "in flight" state for unprocessed requests. Either a request is processed (fully or partially) or it isn't.
+- No timeout needed — if keeper ignores a request, user just cancels it.
 
 ### [d:keeper-emergency] Emergency Redeem Entry Point
 - Keeper and guardian both call Strategy.emergencyRedeem() directly — not through Vault.
@@ -501,6 +503,13 @@ Markers: ✓ confirmed | → suggested | ? open | ~ auto | ✗ removed
 - Implementation detail covered by ADR DT-002: OracleRouter with pluggable IPriceFeed adapters.
 - Architecture scope: oracleValue() converts between tokens using vault's configured oracle. Used for NAV and swap floor checks.
 - Specific interface (Chainlink AggregatorV3, custom feeds) decided in ADR phase, not architecture.
+
+### [d:flr-selection] FlashLoanRouter Selection
+- Strategy does NOT store a FlashLoanRouter address. Keeper provides it as a parameter per-call.
+- Validated against Factory registry: factory.isRegisteredRouter(router) — reverts if not registered.
+- Rationale: multiple FlashLoanRouter implementations exist (per provider). Liquidity varies, providers can go down. Keeper needs flexibility to pick best provider per-call without admin intervention.
+- Security: only admin-registered routers accepted. Keeper cannot pass a fake router.
+- Affected functions: processDeposits, processRedeems pass router to Strategy. syncRedeem: user provides router (also validated). MigrationRouter: uses router parameter from caller.
 
 ### [d:flr-access] FlashLoanRouter.executeFlashLoan Access
 - Open access — anyone can call executeFlashLoan().

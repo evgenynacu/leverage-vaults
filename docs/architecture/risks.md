@@ -1,27 +1,29 @@
 # Risk Mitigation Map
 
+> GENERATED FROM q-tree.md — do not edit, regenerate from q-tree.
+
 | Risk | Source | Mitigation from q-tree | Status |
 |------|--------|----------------------|--------|
 | Reentrancy via flash loan callback | general: flash loan re-entry | EIP-1153 transient storage lock on Vault, covers depositCustom/redeemCustom/processDeposits/processRedeems/syncRedeem + CEI ordering [d:reentrancy-lock] | COVERED |
-| Flash loan callback spoofing | general: spoofed callback injection | FlashLoanRouter validates callback via transient storage (active flag + stored initiator). Only accepts callbacks during active flash loan. Both Strategy and MigrationRouter implement onFlashLoan() [d:flr-invariants, d:flash-callback] | COVERED |
+| Flash loan callback spoofing | general: spoofed callback injection | FlashLoanRouter validates callback via transient storage (active flag + stored initiator). Only accepts callbacks during active flash loan [d:flr-invariants, d:flash-callback] | COVERED |
 | Nested flash loan attack | general: reentrancy via flash loan nesting | FlashLoanRouter transient storage ensures single flash loan at a time, no nesting [d:flr-invariants] | COVERED |
-| Non-zero flash loan fees | general: unexpected cost eroding returns | Only zero-fee flash loan providers used. Factory/registration validates zero-fee property. Simplifies calldata construction [d:flash-fee] | COVERED |
-| Donation attack / balance manipulation | general: ERC4626 donation | No internal tracking; delta NAV makes donation non-exploitable (inflates navBefore and navAfter equally, delta unchanged). Between-snapshot donation prevented by reentrancy lock. Sync redeem donation: attacker loses money (net gain = donation * (shares/totalSupply - 1) < 0) [d:internal-tracking] | COVERED |
+| Non-zero flash loan fees | general: unexpected cost eroding returns | Only zero-fee flash loan providers used. Factory/registration validates zero-fee property [d:flash-fee] | COVERED |
+| Donation attack / balance manipulation | general: ERC4626 donation | Delta NAV makes donation non-exploitable (inflates navBefore and navAfter equally, delta unchanged). Between-snapshot donation prevented by reentrancy lock. Sync redeem donation: attacker loses money [d:internal-tracking] | COVERED |
 | First depositor share inflation | general: vault share inflation | Delta NAV prices each deposit independently; minimum deposit ensures precision with 18-decimal shares; no dead shares needed [d:first-depositor] | COVERED |
 | Oracle manipulation / staleness | general: oracle-dependent pricing | Oracle used only as safety floor for swaps, not for share pricing (delta NAV handles pricing). Swap check: received >= oracleValue * (1 - tolerance) [d:oracle-scope, d:invariant] | COVERED |
 | Oracle manipulation between NAV snapshots (depositCustom) | general: sandwich NAV snapshots | Arithmetic NAV validation: expectedDelta = oracleValue(collateral) - debt, revert on deviation [d:arith-nav] | COVERED |
 | Interest accrual NAV inflation | general: lazy interest accrual | _forceAccrue() before every position read: processDeposits, processRedeems, syncRedeem, depositCustom, redeemCustom, emergencyRedeem, migration flash loan amount [d:accrue-before-snap] | COVERED |
-| Stale position data in pro-rata calculations | general: lazy accrual affects share math | _forceAccrue() before ALL position reads, not just NAV snapshots. Pro-rata debt/collateral computed from actual protocol state after accrual [d:accrue-before-snap] | COVERED |
+| Stale position data in pro-rata calculations | general: lazy accrual affects share math | _forceAccrue() before ALL position reads. Pro-rata debt/collateral computed from actual protocol state after accrual [d:accrue-before-snap] | COVERED |
 | Sandwich / MEV on swaps | general: DEX swap exploitation | Oracle-floor check on all swaps, per-vault toleranceBps with 100 bps hard ceiling [d:invariant, d:tolerance-params] | COVERED |
 | Bad keeper calldata (malicious routing) | general: privileged calldata injection | Same oracle-floor swap verification applies to keeper path [d:verification] | COVERED |
 | Bad user calldata (sync redeem) | general: user-provided calldata | Oracle-floor check applies uniformly to user-provided calldata [d:wd-calldata] | COVERED |
-| Keeper liveness failure (deposits stuck) | general: centralized operator dependency | Per-user timeout + reclaimDeposit; each request has own deadline; guardian can also trigger reclaim [d:per-user-timeout, d:keeper-timeout] | COVERED |
-| Keeper liveness failure (redeems stuck) | general: centralized operator dependency | Sync permissionless redeem always available as alternative exit; per-user timeout + reclaimRedeem for async path [d:sync-redeem, d:per-user-timeout] | COVERED |
-| Keeper censorship / cherry-picking | general: unfair execution ordering | FIFO order mandatory — keeper cannot reorder requests. Partial fills allowed but only from head [d:partial-epoch] | COVERED |
+| Keeper liveness failure (deposits stuck) | general: centralized operator dependency | User can cancel any unprocessed request at any time via cancelDeposit. No timeout needed [d:keeper-timeout, d:per-user-timeout] | COVERED |
+| Keeper liveness failure (redeems stuck) | general: centralized operator dependency | Sync permissionless redeem always available as alternative exit; cancelRedeem for async path [d:sync-redeem, d:keeper-timeout] | COVERED |
+| Keeper censorship / cherry-picking | general: unfair execution ordering | FIFO order mandatory — keeper cannot reorder requests. Partial fills only from head [d:partial-epoch] | COVERED |
 | Fund lockup when paused | general: pause traps user funds | Sync redeem works even when paused; users never locked in [d:pause-scope, d:pause-exit] | COVERED |
-| Excessive leverage / liquidation risk | general: leveraged position risk | maxLTV parameter on Strategy, checked post-leverage on deposit and depositCustom. Emergency unwind (full unwind, no partial rebalance) triggered by keeper/guardian directly on Strategy [d:max-ltv, d:risk, d:keeper-emergency] | COVERED |
+| Excessive leverage / liquidation risk | general: leveraged position risk | maxLTV parameter on Strategy, checked post-leverage on deposit and depositCustom. Emergency unwind (full, no partial rebalance) triggered by keeper/guardian directly on Strategy [d:max-ltv, d:risk, d:keeper-emergency] | COVERED |
 | LTV degradation from partial exit | general: non-proportional withdrawal | Pro-rata exit via fraction preserves LTV ratio for remaining holders [d:wd-partial, d:sync-redeem, d:fraction-arg] | COVERED |
-| Migration LTV violation | general: cross-vault position change | Post-leverage LTV health check on depositCustom via maxLTV, revert if exceeds threshold [d:max-ltv, d:risk] | COVERED |
+| Migration LTV violation | general: cross-vault position change | Post-leverage LTV health check on depositCustom via maxLTV [d:max-ltv, d:risk] | COVERED |
 | Migration YBT conversion loss | general: cross-asset swap risk | MigrationRouter applies oracle-floor check using source oracle for outgoing, destination oracle for incoming [d:migration-verify] | COVERED |
 | Migration flash loan amount mismatch | general: incorrect debt computation | Flash loan amount computed from source vault: shares/totalSupply * actualDebt via getPosition() after _forceAccrue [d:migration-flash-amount] | COVERED |
 | Double-exit (async + sync simultaneously) | general: share double-spend | Shares escrowed (transferred to vault) at requestRedeem time, not in user wallet for sync redeem [d:wd-async] | COVERED |
@@ -31,7 +33,8 @@
 | Admin key compromise | general: privileged role abuse | OZ Ownable2Step (two-step transfer); renounce disabled; separate guardian role; governance via TimelockController later [d:admin-transfer, d:access-details] | COVERED |
 | Accidental admin transfer | general: operational error | Ownable2Step requires propose + accept [d:admin-transfer] | COVERED |
 | Factory misconfiguration | general: deployment parameter error | On-chain validation: oracle reachable, market valid, tolerance <= ceiling, token match [d:factory-validation] | COVERED |
-| Flash loan provider unavailability | general: external dependency | Strategy can switch FlashLoanRouter via admin; multiple providers supported [d:new-flashloan] | COVERED |
+| Flash loan provider unavailability | general: external dependency | FlashLoanRouter provided per-call from Factory registry; keeper/user picks best available provider without admin intervention [d:flr-selection, d:new-flashloan] | COVERED |
+| Malicious FlashLoanRouter injection | general: fake router attack | FlashLoanRouter validated against Factory admin-managed registry (factory.isRegisteredRouter) on every call that accepts it as parameter [d:flr-selection] | COVERED |
 | MigrationRouter upgrade breaks existing vaults | general: upgrade compatibility | MigrationRouter is stateless and immutable; new router for new vaults; existing vaults updated explicitly by admin [d:migration-router-upgrade] | COVERED |
-| Swap calldata amount mismatch (interest accrual between construction and execution) | general: off-chain/on-chain amount divergence | Caller builds calldata with margin for slightly less amountIn. Oracle-floor check still validates output. Residual dust stays in Strategy [d:swap-margin] | COVERED |
-| redeemCustom baseToken delivery | general: token transfer ordering | MigrationRouter transfers baseToken to Strategy before calling Vault.redeemCustom(), ensuring Strategy has funds to repay debt [d:redeem-custom-flow] | COVERED |
+| Swap calldata amount mismatch | general: off-chain/on-chain amount divergence | Caller builds calldata with margin for slightly less amountIn. Oracle-floor check validates output. Residual dust stays in Strategy [d:swap-margin] | COVERED |
+| redeemCustom baseToken delivery ordering | general: token transfer ordering | MigrationRouter transfers baseToken to Strategy before calling Vault.redeemCustom() [d:redeem-custom-flow] | COVERED |

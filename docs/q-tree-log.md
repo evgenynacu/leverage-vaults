@@ -462,3 +462,57 @@ No consistency issues. Vault.forceRedeem removed from naming convention, emergen
 [Round 14] Resolved: 69 | Suggested: 0 | Open: 0
 
 ---
+
+## Round 15
+
+### Presented
+User-initiated questions (not from EXPAND):
+1. "reclaimDeposit/reclaimRedeem нужны ли? Это не то же самое, что cancel?"
+2. "processDeposits/processRedeems — как именно partial processing работает?"
+
+### User response
+1. "да, убираем" — reclaim redundant with cancel, per-user timeout removed.
+2. Выбрал вариант B (amount-based с partial fill). Naming: processDeposits(amount, ...), processRedeems(shares, ...).
+
+### Discussion
+Reclaim vs cancel: with partial epoch processing (FIFO, amount-based), no "in flight" state for unprocessed requests. Cancel always available → reclaim/timeout redundant.
+
+Partial processing mechanics: three options presented (count-based, amount-based with partial fill, amount-based without partial fill). User chose amount-based with partial fill — keeper specifies exact volume, contract iterates FIFO, last request may be partially filled.
+
+### Recorded
+1. ✗ Per-user timeout → removed, cancel covers all scenarios
+2. ✓ Partial epoch processing → amount-based (processDeposits(amount), processRedeems(shares)), FIFO, partial fills
+
+### Check
+No consistency issues. reclaimDeposit/reclaimRedeem removed from interfaces.
+
+[Round 15] Resolved: 68 | Suggested: 0 | Open: 0
+
+---
+
+## Round 16
+
+### Presented
+User-initiated: FlashLoanRouter contradiction
+1. "FlashLoanRouter per-provider, но Strategy хранит один адрес — противоречие"
+2. "Нужно ли хранить адрес или keeper может выбирать? Есть ли атака?"
+
+### User response
+Keeper выбирает per-call, но из зарегистрированного списка (Factory registry). Не stored на Strategy, не произвольный.
+
+### Discussion
+- Strategy storing single FlashLoanRouter = unnecessary limitation (provider down → stuck)
+- Keeper-provided from open set = attack vector (fake router → arbitrary callback)
+- Solution: Factory registry of admin-approved routers, keeper picks per-call, validated at call time
+- User also asked how to improve summarizer to catch such issues → user will fix skill prompts separately
+
+### Recorded
+1. ✓ FlashLoanRouter selection → keeper picks per-call from Factory registry, not stored on Strategy
+2. Updated [d:new-flashloan] to reflect registry model instead of admin-switch-per-vault
+
+### Check
+Consistency update needed: [d:new-flashloan] previously said "admin function on Strategy to switch". Now Strategy has no stored router. FlashLoanRouter is parameter + registry check.
+
+[Round 16] Resolved: 69 | Suggested: 0 | Open: 0
+
+---
